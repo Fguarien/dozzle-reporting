@@ -15,6 +15,7 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+COPY deploy ./deploy
 RUN mkdir -p /data && chown node:node /data
 USER node
 VOLUME ["/data"]
