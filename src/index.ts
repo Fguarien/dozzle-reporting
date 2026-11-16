@@ -265,9 +265,20 @@ async function notify(title: string, body: string): Promise<void> {
   const url = process.env["NOTIFY_URL"];
   if (!url) return;
   try {
-    const headers: Record<string, string> = { Title: title.slice(0, 200).replace(/[^\x20-\x7e]/g, "?") };
+    const headers: Record<string, string> = {};
     if (process.env["NOTIFY_TOKEN"]) headers["Authorization"] = `Bearer ${process.env["NOTIFY_TOKEN"]}`;
-    await fetch(url, { method: "POST", body: body.slice(0, 4000), headers });
+    let payload: string;
+    if (process.env["NOTIFY_FORMAT"] === "json") {
+      // Generic JSON hook: {"channel", "title", "message"} (Discord/Slack relays, alert hubs).
+      headers["Content-Type"] = "application/json";
+      payload = JSON.stringify({ channel: process.env["NOTIFY_CHANNEL"] ?? "general", title: title.slice(0, 200), message: body.slice(0, 4000) });
+    } else {
+      // ntfy-compatible: Title header, plain-text body.
+      headers["Title"] = title.slice(0, 200).replace(/[^\x20-\x7e]/g, "?");
+      payload = body.slice(0, 4000);
+    }
+    const r = await fetch(url, { method: "POST", body: payload, headers, signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) log(`notify answered ${r.status}`);
   } catch (e) {
     log(`notify failed: ${(e as Error).message}`);
   }
