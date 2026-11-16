@@ -100,7 +100,11 @@ export async function reviewLogs(db: Db, cfg: Config, clients: Map<string, Dozzl
       llm,
       `You review 24 hours of Docker container warning/error logs and report only problems worth an operator's time. Answer in ${LANG_NAME[llm.language] ?? llm.language}. ` +
         `Return JSON {"findings":[{"key":string,"severity":"low"|"medium"|"high"|"critical","containers":[string],"headline":string,"why":string,"fix":string}]}. ` +
-        `key: a stable kebab-case id for the underlying problem (reuse a known key when it is the same problem). Ignore benign noise, deprecation warnings and one-off retries that recovered. ` +
+        `key: a stable kebab-case id for the underlying problem (reuse a known key when it is the same problem). ` +
+        `Report a problem ONLY if the evidence shows it repeating (×2 or more) or a fatal/panic, AND it plausibly breaks or degrades the service (failed connections, auth failures, crashes, data errors, full disks). ` +
+        `NEVER report: startup/configuration advisories (Redis vm.overcommit_memory, transparent huge pages, "no password set"), deprecation notices, single retries that recovered, debug chatter, or warnings a healthy service emits by design. ` +
+        `When unsure, leave it out: an empty list is a good answer. Severity: critical = service down or data loss; high = a feature is broken for users; medium = degraded or failing in the background; low = worth a look. ` +
+        `Write every headline, why and fix in the requested language, quoting the exact error text. ` +
         `Known open findings (reuse their key if still present): ${JSON.stringify(known.map((k) => ({ key: k.fingerprint, headline: k.headline })))}`,
       ch,
       true,

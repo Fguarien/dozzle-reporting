@@ -13,6 +13,7 @@ export interface PageCtx {
   config: Config;
   lang: Lang;
   user?: string;
+  breakglass?: boolean;
   now: number;
   query: URLSearchParams;
 }
@@ -93,7 +94,7 @@ export function layout(c: PageCtx, active: string, title: string, body: string):
 <button id="langbtn" onclick="cycleLang()" data-lang="${c.lang}">${c.lang.toUpperCase()}</button>
 <button id="themebtn" onclick="cycleTheme()" data-auto="${L("auto")}" data-light="${L("light")}" data-dark="${L("dark")}">${L("auto")}</button>
 ${c.user ? `<span class="muted">${esc(c.user)}</span> <a class="link" href="${b}/auth/logout">${L("signOut")}</a>` : ""}</header>
-<main>${body}</main></div></div></body></html>`;
+<main>${c.breakglass ? `<div class="card" style="background:#b91c1c;color:#fff;border:0">Session de secours (1 h) · Break-glass session (1 h)</div>` : ""}${body}</main></div></div></body></html>`;
 }
 
 function fmtTime(ms: number, c: PageCtx, withDate = false): string {
@@ -120,13 +121,38 @@ const pctS = (n: number | null | undefined) => (n === null || n === undefined ? 
 export function spark(values: number[], color: string, w = 120, h = 28): string {
   if (values.length < 2) return `<svg class="spark" width="${w}" height="${h}"></svg>`;
   const max = Math.max(...values, 1e-9);
-  const pts = values.map((v, i) => `${((i / (values.length - 1)) * w).toFixed(1)},${(h - 2 - (v / max) * (h - 4)).toFixed(1)}`);
+  const pts = values.map((v, i) => `${Math.round((i / (values.length - 1)) * w)},${Math.round(h - 2 - (v / max) * (h - 4))}`);
   return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polygon points="0,${h} ${pts.join(" ")} ${w},${h}" fill="${color}" opacity=".15"/><polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
 }
 
 function seriesFor(db: Db, instance: string, host: string, name: string, from: number, field: "cpu_avg" | "mem_avg", points = 30): number[] {
+  from = dataFrom(db, from);
   const step = Math.max(30_000, Math.ceil((Date.now() - from) / points / 30_000) * 30_000);
-  return (db.prepare(`SELECT avg(${field}) v FROM metrics WHERE instance_id=? AND host=? AND container_name=? AND ts>=? GROUP BY ts/? ORDER BY ts`).all(instance, host, name, from, step) as { v: number }[]).map((r) => r.v);
+  return (db.prepare(`SELECT avg(${field}) v FROM metrics WHERE instance_id=? AND host=? AND container_name=? AND ts>=? GROUP BY CAST(ts / ? AS INTEGER) ORDER BY ts`).all(instance, host, name, from, step) as { v: number }[]).map((r) => r.v);
+}
+
+/** All sparklines of a page in ONE query: key "instance|host|name" → cpu[] and mem[]. */
+/** Span actually covered by data: a 24 h window over 1 h of history must not draw 2 points. */
+function dataFrom(db: Db, from: number): number {
+  const r = db.prepare("SELECT min(ts) t FROM metrics WHERE ts>=?").get(from) as { t: number | null };
+  return Math.max(from, r.t ?? from);
+}
+
+function seriesAll(db: Db, from: number, now: number, points = 24): Map<string, { cpu: number[]; mem: number[] }> {
+  from = dataFrom(db, from);
+  const step = Math.max(30_000, Math.ceil((now - from) / points / 30_000) * 30_000);
+  const rows = db
+    .prepare(`SELECT instance_id i, host h, container_name n, CAST(ts / ? AS INTEGER) b, avg(cpu_avg) c, avg(mem_avg) m FROM metrics WHERE ts>=? GROUP BY i, h, n, b ORDER BY i, h, n, b`)
+    .all(step, from) as { i: string; h: string; n: string; c: number; m: number }[];
+  const out = new Map<string, { cpu: number[]; mem: number[] }>();
+  for (const r of rows) {
+    const k = `${r.i}|${r.h}|${r.n}`;
+    let e = out.get(k);
+    if (!e) out.set(k, (e = { cpu: [], mem: [] }));
+    e.cpu.push(r.c);
+    e.mem.push(r.m);
+  }
+  return out;
 }
 
 function hostNames(db: Db): Map<string, string> {
@@ -171,7 +197,7 @@ ${happened.map((h) => `<div class="row"><div class="t">${fmtTime(h.ts, c)}</div>
 <h2>${L("worthFixing")}</h2>
 ${open.length ? open.map((f) => `<div class="card"><span class="chip ${f.severity === "high" || f.severity === "critical" ? "err" : "warn"}">${esc(f.severity)}</span> <b>${esc(f.headline)}</b><div class="muted">${esc(JSON.parse(String(f.containers)).join(", "))}</div></div>`).join("") : `<div class="card">✓ ${L("nothingToFix")}</div>`}
 <h2>${L("resources24h")} <a class="link" style="float:right;font-size:13px;font-weight:400" href="${b}/metrics">${L("allMetrics")}</a></h2>
-<div class="grid2"><div><div class="muted">${L("cpu")}</div><div class="big">${pctS(totals.cpu)}</div><div class="muted">${L("acrossN", { n: totals.n ?? 0 })}</div>${topList("cpu_avg", "var(--cpu)")}</div>
+<div class="grid2"><div><div class="muted">${L("cpu")}</div><div class="big">${((totals.cpu ?? 0) / 100).toFixed(1)} <span style="font-size:18px">${c.lang === "fr" ? "cœurs" : "cores"}</span></div><div class="muted">${L("acrossN", { n: totals.n ?? 0 })}</div>${topList("cpu_avg", "var(--cpu)")}</div>
 <div><div class="muted">${L("memory")}</div><div class="big">${fmtBytes(totals.mem)}</div><div class="muted">${L("acrossN", { n: totals.n ?? 0 })}</div>${topList("mem_avg", "var(--mem)")}</div></div>`,
   );
 }
@@ -248,6 +274,8 @@ export function metricsPage(c: PageCtx): string {
   const rows = c.db
     .prepare(`SELECT instance_id, host, container_name name, avg(cpu_avg) cpu, max(cpu_max) cpu_pk, avg(mem_avg) mem, avg(mem_pct_avg) pct FROM metrics WHERE ts>=? GROUP BY instance_id, host, container_name ORDER BY host, ${sort === "mem_avg" ? "mem" : "cpu"} DESC`)
     .all(from) as { instance_id: string; host: string; name: string; cpu: number; cpu_pk: number; mem: number; pct: number }[];
+  const series = seriesAll(c.db, from, c.now);
+  const sp = (r: { instance_id: string; host: string; name: string }) => series.get(`${r.instance_id}|${r.host}|${r.name}`) ?? { cpu: [], mem: [] };
   const byHost = new Map<string, typeof rows>();
   for (const r of rows) byHost.set(r.host, [...(byHost.get(r.host) ?? []), r]);
   const b = c.config.basePath;
@@ -258,7 +286,7 @@ export function metricsPage(c: PageCtx): string {
       return `<h2>${esc(hn.get(h) ?? h)} <span class="muted" style="font-weight:400;font-size:13px">${rs.length} ${L("containers")} · ${pctS(cpu)} · ${fmtBytes(mem)}</span></h2><div class="grid3">${rs
         .map(
           (r) =>
-            `<a class="card mc" style="text-decoration:none;margin:0" href="${b}/metrics/${encodeURIComponent(r.instance_id)}/${encodeURIComponent(r.host)}/${encodeURIComponent(r.name)}?h=${hours}"><h3>${esc(r.name)}</h3><div class="kv"><div><div class="l">${L("cpu")}</div><b>${pctS(r.cpu)}</b> <span class="l">${L("peak")} ${pctS(r.cpu_pk)}</span></div>${spark(seriesFor(c.db, r.instance_id, r.host, r.name, from, "cpu_avg", 24), "var(--cpu)", 90, 26)}</div><div class="kv"><div><div class="l">${L("memory")}</div><b>${fmtBytes(r.mem)}</b> <span class="l">${pctS(r.pct)} ${L("ofLimit")}</span></div>${spark(seriesFor(c.db, r.instance_id, r.host, r.name, from, "mem_avg", 24), "var(--mem)", 90, 26)}</div></a>`,
+            `<a class="card mc" style="text-decoration:none;margin:0" href="${b}/metrics/${encodeURIComponent(r.instance_id)}/${encodeURIComponent(r.host)}/${encodeURIComponent(r.name)}?h=${hours}"><h3>${esc(r.name)}</h3><div class="kv"><div><div class="l">${L("cpu")}</div><b>${pctS(r.cpu)}</b> <span class="l">${L("peak")} ${pctS(r.cpu_pk)}</span></div>${spark(sp(r).cpu, "var(--cpu)", 90, 26)}</div><div class="kv"><div><div class="l">${L("memory")}</div><b>${fmtBytes(r.mem)}</b> <span class="l">${pctS(r.pct)} ${L("ofLimit")}</span></div>${spark(sp(r).mem, "var(--mem)", 90, 26)}</div></a>`,
         )
         .join("")}</div>`;
     })

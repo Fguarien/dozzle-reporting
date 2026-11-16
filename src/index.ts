@@ -12,6 +12,7 @@ import { registerTools, type ToolContext, type ToolRegistry } from "./mcp/tools.
 import * as ui from "./web/ui.ts";
 import type { PageCtx } from "./web/ui.ts";
 import { pickLang } from "./web/i18n.ts";
+import { configFromEnv, OidcGate } from "./auth/oidc-gate.ts";
 import { reviewLogs, summarizeAlert } from "./llm/review.ts";
 
 /** Run one MCP tool in-process (the UI reuses the tools so both answer the same way). */
@@ -131,6 +132,12 @@ async function main(): Promise<void> {
   for (const c of collectors) void c.run();
   setInterval(() => prune(db, cfg.retentionDays), 3_600_000).unref();
 
+  const gate = (() => {
+    const g = configFromEnv(cfg.publicUrl, cfg.basePath);
+    return g ? new OidcGate(g, log) : undefined;
+  })();
+  log(`UI auth: ${gate ? "OIDC " + gate.cfg.issuer + (gate.cfg.breakglass.hash ? " + break-glass" : "") : process.env["TRUST_USER_HEADER"] ? "proxy header " + process.env["TRUST_USER_HEADER"] : process.env["UI_AUTH"] === "none" ? "NONE (UI_AUTH=none)" : "disabled"}`);
+
   const http = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
     const path = url.pathname;
@@ -166,16 +173,37 @@ async function main(): Promise<void> {
         return send(res, 202, JSON.stringify({ alert: row.id, status: row.status }), "application/json");
       }
 
-      if (req.method === "GET" && (path === cfg.basePath || path.startsWith(cfg.basePath + "/") || (cfg.basePath === "" && !path.startsWith("/hooks")))) {
+      const inUi = path === cfg.basePath || path.startsWith(cfg.basePath + "/") || (cfg.basePath === "" && !path.startsWith("/hooks"));
+      if (inUi) {
         const sub = path.slice(cfg.basePath.length).replace(/\/$/, "");
-        const userHeader = process.env["TRUST_USER_HEADER"];
-        const user = userHeader ? (req.headers[userHeader.toLowerCase()] as string | undefined) : undefined;
-        if (process.env["REQUIRE_USER_HEADER"] === "true" && !user) return send(res, 401, "unauthorized");
+        // Authentication of the UI: OIDC (preferred), a trusted proxy header, or explicitly none.
+        let user: string | undefined;
+        let breakglass = false;
+        if (gate) {
+          if (sub.startsWith("/auth/")) {
+            if (await gate.handle(req, res, sub, url)) return;
+            return send(res, 404, "not found");
+          }
+          const u = gate.user(req);
+          if (!u) {
+            res.writeHead(302, { Location: `${cfg.basePath}/auth/login?next=${encodeURIComponent(path + url.search)}`, "Cache-Control": "no-store" });
+            return res.end();
+          }
+          user = u.name;
+          breakglass = !!u.breakglass;
+        } else if (process.env["TRUST_USER_HEADER"]) {
+          user = req.headers[process.env["TRUST_USER_HEADER"].toLowerCase()] as string | undefined;
+          if (!user) return send(res, 401, "unauthorized");
+        } else if (process.env["UI_AUTH"] !== "none") {
+          return send(res, 403, "UI disabled: set OIDC_ISSUER (recommended), TRUST_USER_HEADER, or UI_AUTH=none.");
+        }
+        if (req.method !== "GET") return send(res, 405, "method not allowed");
         const pc: PageCtx = {
           db,
           config: cfg,
           lang: pickLang(req.headers.cookie, req.headers["accept-language"]),
           user,
+          breakglass,
           now: Date.now(),
           query: url.searchParams,
         };

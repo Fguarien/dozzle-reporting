@@ -254,7 +254,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): ToolRegistry
       const step = Math.max(30_000, Math.ceil((a.window_hours * H) / a.points / 30_000) * 30_000);
       const rows = db
         .prepare(
-          `SELECT (ts / ?) * ? AS b, avg(cpu_avg) cpu, max(cpu_max) cpu_pk, avg(mem_avg) mem, max(mem_max) mem_pk, avg(mem_pct_avg) pct
+          `SELECT CAST(ts / ? AS INTEGER) * ? AS b, avg(cpu_avg) cpu, max(cpu_max) cpu_pk, avg(mem_avg) mem, max(mem_max) mem_pk, avg(mem_pct_avg) pct
            FROM metrics WHERE instance_id=? AND host=? AND container_name=? AND ts >= ? GROUP BY b ORDER BY b`,
         )
         .all(step, step, c.instance_id, c.host, c.name, from) as { b: number; cpu: number; cpu_pk: number; mem: number; mem_pk: number; pct: number }[];
