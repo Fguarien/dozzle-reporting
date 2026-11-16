@@ -1,0 +1,5 @@
+# Quarantaine de versions : rien de publié depuis moins de 7 jours.
+minimumReleaseAge: 10080        # minutes = 7 jours
+minimumReleaseAgeStrict: true   # sinon un `pnpm add pkg@version` explicite s'auto-exclut
+blockExoticSubdeps: true        # refuse une sous-dépendance servie depuis git ou une tarball
+trustPolicy: no-downgrade
