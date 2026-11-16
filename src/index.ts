@@ -8,7 +8,17 @@ import { openDb, prune, kvGet, kvSet, type Db } from "./store/db.ts";
 import { DozzleClient } from "./dozzle/client.ts";
 import { Collector } from "./collector.ts";
 import { Alerts, type DozzleNotification } from "./alerts.ts";
-import { registerTools, type ToolContext } from "./mcp/tools.ts";
+import { registerTools, type ToolContext, type ToolRegistry } from "./mcp/tools.ts";
+import * as ui from "./web/ui.ts";
+import type { PageCtx } from "./web/ui.ts";
+import { pickLang } from "./web/i18n.ts";
+
+/** Run one MCP tool in-process (the UI reuses the tools so both answer the same way). */
+async function callTool(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<string> {
+  const { registry } = buildToolServer(ctx);
+  const r = await registry.run(name, args);
+  return r.content.map((c) => c.text).join("\n");
+}
 
 export const VERSION = "0.1.0";
 
@@ -65,10 +75,10 @@ async function ensureDispatcher(db: Db, cfg: Config, client: DozzleClient, webho
   return created.id;
 }
 
-export function buildToolServer(ctx: ToolContext): { server: McpServer; names: string[] } {
+export function buildToolServer(ctx: ToolContext): { server: McpServer; registry: ToolRegistry } {
   const server = new McpServer({ name: "dozzle-reporting", version: VERSION }, { capabilities: { tools: {} } });
-  const names = registerTools(server, ctx);
-  return { server, names };
+  const registry = registerTools(server, ctx);
+  return { server, registry };
 }
 
 async function main(): Promise<void> {
@@ -129,6 +139,54 @@ async function main(): Promise<void> {
         const n = JSON.parse(await readBody(req)) as DozzleNotification;
         const row = alerts.ingest(instanceId, n);
         return send(res, 202, JSON.stringify({ alert: row.id, status: row.status }), "application/json");
+      }
+
+      if (req.method === "GET" && (path === cfg.basePath || path.startsWith(cfg.basePath + "/") || (cfg.basePath === "" && !path.startsWith("/hooks")))) {
+        const sub = path.slice(cfg.basePath.length).replace(/\/$/, "");
+        const userHeader = process.env["TRUST_USER_HEADER"];
+        const user = userHeader ? (req.headers[userHeader.toLowerCase()] as string | undefined) : undefined;
+        if (process.env["REQUIRE_USER_HEADER"] === "true" && !user) return send(res, 401, "unauthorized");
+        const pc: PageCtx = {
+          db,
+          config: cfg,
+          lang: pickLang(req.headers.cookie, req.headers["accept-language"]),
+          user,
+          now: Date.now(),
+          query: url.searchParams,
+        };
+        let html: string | undefined;
+        const m = sub.match(/^\/metrics\/([^/]+)\/([^/]+)\/([^/]+)$/);
+        if (sub === "") html = ui.overview(pc);
+        else if (sub === "/findings") html = ui.findings(pc);
+        else if (sub === "/updates") html = ui.updates(pc);
+        else if (sub === "/alerts") html = ui.alertsPage(pc, "alerts");
+        else if (sub === "/alerts/events") html = ui.alertsPage(pc, "events");
+        else if (sub === "/alerts/muted") html = ui.alertsPage(pc, "muted");
+        else if (sub === "/metrics") html = ui.metricsPage(pc);
+        else if (m) html = ui.metricDetail(pc, decodeURIComponent(m[1]!), decodeURIComponent(m[2]!), decodeURIComponent(m[3]!));
+        else if (sub === "/logs") {
+          let result: string | undefined;
+          const q = url.searchParams;
+          if (q.get("q") || q.get("container")) {
+            const r = await callTool(ctx, "search_logs", {
+              query: q.get("q") || undefined,
+              container_name: q.get("container") || undefined,
+              after: q.get("after") || "1h",
+              limit: 300,
+            });
+            result = r;
+          }
+          html = ui.logsPage(pc, result);
+        } else if (sub === "/instances") {
+          const versions = new Map<string, string>();
+          await Promise.all([...clients.values()].map(async (c) => versions.set(c.id, await c.version().catch(() => ""))));
+          for (const [k, v] of versions) if (!v) versions.delete(k);
+          html = ui.instancesPage(pc, versions);
+        } else if (sub === "/integrations") html = ui.integrationsPage(pc);
+        if (html) {
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "same-origin" });
+          return res.end(html);
+        }
       }
 
       return send(res, 404, "not found");

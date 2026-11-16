@@ -112,13 +112,28 @@ const containerArg = z.string().describe("Container name (exact, prefix or subst
 const hostArg = z.string().optional().describe("Host name (as shown by rpc_list_hosts) to disambiguate.");
 const instanceArg = z.string().optional().describe("instance_id from list_dozzle_instances; defaults to all / the first.");
 
-export function registerTools(server: McpServer, ctx: ToolContext): string[] {
+export interface ToolRegistry {
+  names: string[];
+  /** Run a tool in-process with the same argument validation (and defaults) as over MCP. */
+  run: (name: string, args: Record<string, unknown>) => Promise<Text>;
+}
+
+export function registerTools(server: McpServer, ctx: ToolContext): ToolRegistry {
   const { db, config } = ctx;
   const tz = config.timezone;
   const now = () => (ctx.now ? ctx.now() : Date.now());
   const names: string[] = [];
+  const local = new Map<string, (args: Record<string, unknown>) => Promise<Text>>();
   const reg = <S extends z.ZodRawShape>(name: string, description: string, shape: S, handler: (a: z.infer<z.ZodObject<S>>) => Promise<Text> | Text, destructive = false) => {
     names.push(name);
+    const schema = z.object(shape);
+    local.set(name, async (args) => {
+      try {
+        return await handler(schema.parse(args) as z.infer<z.ZodObject<S>>);
+      } catch (e) {
+        return fail(`${name} failed: ${(e as Error).message}`);
+      }
+    });
     server.registerTool(
       name,
       { description, inputSchema: shape, annotations: { readOnlyHint: !destructive, destructiveHint: destructive } },
@@ -627,7 +642,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): string[] {
     true,
   );
 
-  return names;
+  return {
+    names,
+    run: async (name, args) => {
+      const f = local.get(name);
+      if (!f) return fail(`no tool ${name}`);
+      return f(args);
+    },
+  };
 }
 
 export async function mapLimit<T>(xs: T[], n: number, f: (x: T) => Promise<void>): Promise<void> {
