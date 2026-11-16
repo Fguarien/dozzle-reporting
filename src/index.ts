@@ -12,6 +12,7 @@ import { registerTools, type ToolContext, type ToolRegistry } from "./mcp/tools.
 import * as ui from "./web/ui.ts";
 import type { PageCtx } from "./web/ui.ts";
 import { pickLang } from "./web/i18n.ts";
+import { reviewLogs, summarizeAlert } from "./llm/review.ts";
 
 /** Run one MCP tool in-process (the UI reuses the tools so both answer the same way). */
 async function callTool(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<string> {
@@ -87,12 +88,36 @@ async function main(): Promise<void> {
   const clients = new Map(cfg.instances.map((i) => [i.id, new DozzleClient(i)]));
   const webhookUrl = (process.env["WEBHOOK_BASE_URL"] ?? `http://localhost:${cfg.port}`).replace(/\/$/, "");
 
-  const alerts = new Alerts(db, {
+  const alerts: Alerts = new Alerts(db, {
     onSent: async (a) => {
-      log(`alert #${a.id} sent: ${a.title}`);
-      await notify(a.title ?? "alert", a.summary ?? a.sample ?? "");
+      let title = a.title ?? "alert";
+      let body = a.sample ?? "";
+      if (cfg.llm) {
+        try {
+          const s = await summarizeAlert(cfg.llm, a);
+          alerts.setSummary(a.id, s.title || null, s.summary);
+          title = s.title || title;
+          body = s.summary || body;
+        } catch (e) {
+          log(`summary of alert #${a.id} failed: ${(e as Error).message}`);
+        }
+      }
+      log(`alert #${a.id} sent: ${title}`);
+      await notify(title, `${body}\n\n${cfg.publicUrl}${cfg.basePath}/alerts`);
     },
   });
+
+  // Daily log review at REVIEW_HOUR (local TZ). Checked every minute; runs once per day.
+  if (cfg.llm) {
+    setInterval(() => {
+      const h = Number(new Date().toLocaleString("en-GB", { timeZone: cfg.timezone, hour: "2-digit", hour12: false }));
+      const day = new Date().toLocaleDateString("sv-SE", { timeZone: cfg.timezone });
+      if (h === cfg.reviewHour && kvGet(db, "review:last") !== day) {
+        kvSet(db, "review:last", day);
+        reviewLogs(db, cfg, clients, log).catch((e) => log(`review failed: ${(e as Error).message}`));
+      }
+    }, 60_000).unref();
+  }
 
   const ctx: ToolContext = {
     db,
