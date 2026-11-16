@@ -20,6 +20,7 @@ services:
       # LLM (optional): alert summaries and the daily log review
       # LLM_BASE_URL: https://api.mistral.ai/v1
       # LLM_MODEL: mistral-large-latest
+      # LLM_SUMMARY_MODEL: model for per-alert summaries (many calls/day); defaults to LLM_MODEL
       # LLM_LANGUAGE: en
       # Web UI login (recommended): any OIDC provider
       # OIDC_ISSUER: https://auth.example.com/application/o/dozzle-reporting/

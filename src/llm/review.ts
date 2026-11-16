@@ -31,8 +31,9 @@ const LANG_NAME: Record<string, string> = { fr: "French", en: "English", de: "Ge
 
 /** Two-sentence summary + short title for a sent alert, in the configured language. */
 export async function summarizeAlert(llm: Llm, a: AlertRow): Promise<{ title: string; summary: string }> {
+  // Alerts fire many times a day: they use the (cheaper) summary model, the daily review keeps LLM_MODEL.
   const out = await chat(
-    llm,
+    { ...llm, model: llm.summaryModel },
     `You triage Docker container alerts for an operator. Answer in ${LANG_NAME[llm.language] ?? llm.language}. Return JSON {"title": string, "summary": string}. ` +
       `title: under 90 characters, "<container> <what happened> — <cause>". summary: 2 sentences, quote the exact error, say what to check. No speculation beyond the evidence.`,
     `Container: ${a.container_name}\nRule: ${a.source}\nKind: ${a.kind}\nEvidence:\n${(a.sample ?? "").slice(0, 3000)}`,

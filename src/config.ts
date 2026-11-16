@@ -30,7 +30,7 @@ export interface Config {
   webhookSecret?: string;
   retentionDays: number;
   bucketSeconds: number;
-  llm?: { baseUrl: string; apiKey?: string; model: string; language: string };
+  llm?: { baseUrl: string; apiKey?: string; model: string; summaryModel: string; language: string };
   reviewHour: number;
   timezone: string;
   allowActions: boolean;
@@ -87,7 +87,7 @@ export function loadConfig(): Config {
     retentionDays: Number(env("RETENTION_DAYS", "30")),
     bucketSeconds: Number(env("BUCKET_SECONDS", "30")),
     llm: llmUrl
-      ? { baseUrl: llmUrl.replace(/\/$/, ""), apiKey: env("LLM_API_KEY"), model: env("LLM_MODEL", "gpt-4o-mini")!, language: env("LLM_LANGUAGE", "en")! }
+      ? { baseUrl: llmUrl.replace(/\/$/, ""), apiKey: env("LLM_API_KEY"), model: env("LLM_MODEL", "gpt-4o-mini")!, summaryModel: env("LLM_SUMMARY_MODEL") ?? env("LLM_MODEL", "gpt-4o-mini")!, language: env("LLM_LANGUAGE", "en")! }
       : undefined,
     reviewHour: Number(env("REVIEW_HOUR", "21")),
     timezone: env("TZ", "UTC")!,
