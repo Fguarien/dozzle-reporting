@@ -4,3 +4,6 @@ dist/
 *.db-*
 .env
 coverage/
+docker-compose.yml
+data/
+*.bak*

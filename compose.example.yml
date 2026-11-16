@@ -1,0 +1,36 @@
+# Example: run dozzle-reporting next to an existing Dozzle (v11+).
+# Copy to docker-compose.yml, adjust, and put secrets in .env (see README).
+services:
+  dozzle-reporting:
+    build: .
+    container_name: dozzle-reporting
+    restart: unless-stopped
+    env_file: .env            # MCP_TOKEN, WEBHOOK_SECRET, LLM_API_KEY, OIDC_CLIENT_SECRET, SESSION_SECRET
+    environment:
+      DOZZLE_URL: http://dozzle:8080
+      # Dozzle with forward-proxy auth: send a user and the roles this service needs.
+      # DOZZLE_AUTH: forward-proxy
+      # DOZZLE_PROXY_USER_HEADER: Remote-User
+      # DOZZLE_PROXY_ROLES_HEADER: Remote-Groups
+      # DOZZLE_PROXY_ROLES: all
+      PUBLIC_URL: https://dozzle.example.com
+      BASE_PATH: /reporting
+      WEBHOOK_BASE_URL: http://dozzle-reporting:8095   # how Dozzle reaches this service
+      TZ: Europe/Paris
+      # LLM (optional): alert summaries and the daily log review
+      # LLM_BASE_URL: https://api.mistral.ai/v1
+      # LLM_MODEL: mistral-large-latest
+      # LLM_LANGUAGE: en
+      # Web UI login (recommended): any OIDC provider
+      # OIDC_ISSUER: https://auth.example.com/application/o/dozzle-reporting/
+      # OIDC_CLIENT_ID: dozzle-reporting
+      # OIDC_REQUIRE_GROUP: admins
+    volumes:
+      - ./data:/data
+    ports:
+      - "8095:8095"
+    networks: [dozzle]
+networks:
+  dozzle:
+    external: true
+    name: dozzle_default
