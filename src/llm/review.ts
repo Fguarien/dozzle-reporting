@@ -20,7 +20,7 @@ export async function chat(llm: Llm, system: string, user: string, json = false)
       ],
       ...(json ? { response_format: { type: "json_object" } } : {}),
     }),
-    signal: AbortSignal.timeout(180_000),
+    signal: AbortSignal.timeout(Number(process.env["LLM_TIMEOUT_MS"] ?? 300_000)),
   });
   if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const j = (await r.json()) as { choices: { message: { content: string } }[] };
@@ -78,7 +78,8 @@ export async function reviewLogs(db: Db, cfg: Config, clients: Map<string, Dozzl
       const top = [...seen.values()].sort((a, b) => b.n - a.n).slice(0, 8);
       evidence.push(`## ${c.name}\n${top.map((t) => `- [${t.level} ×${t.n}] ${t.msg}`).join("\n")}`);
     } catch (e) {
-      log(`review: ${c.name}: ${(e as Error).message}`);
+      // Ephemeral containers vanish between the snapshot and the read: not worth a log line.
+      if (!/not found/i.test((e as Error).message)) log(`review: ${c.name}: ${(e as Error).message}`);
     }
   });
   const known = db.prepare("SELECT fingerprint, headline FROM findings WHERE status IN ('open','ongoing')").all() as { fingerprint: string; headline: string }[];
@@ -87,12 +88,15 @@ export async function reviewLogs(db: Db, cfg: Config, clients: Map<string, Dozzl
   const chunks: string[] = [];
   let cur = "";
   for (const e of evidence) {
-    if (cur.length + e.length > 40_000) (chunks.push(cur), (cur = ""));
+    if (cur.length + e.length > Number(process.env["LLM_CHUNK_CHARS"] ?? 12_000)) (chunks.push(cur), (cur = ""));
     cur += e + "\n\n";
   }
   if (cur) chunks.push(cur);
+  let failedChunks = 0;
   for (const ch of chunks) {
-    const out = await chat(
+    let out: string;
+    try {
+      out = await chat(
       llm,
       `You review 24 hours of Docker container warning/error logs and report only problems worth an operator's time. Answer in ${LANG_NAME[llm.language] ?? llm.language}. ` +
         `Return JSON {"findings":[{"key":string,"severity":"low"|"medium"|"high"|"critical","containers":[string],"headline":string,"why":string,"fix":string}]}. ` +
@@ -101,6 +105,12 @@ export async function reviewLogs(db: Db, cfg: Config, clients: Map<string, Dozzl
       ch,
       true,
     );
+    } catch (e) {
+      // One slow or failed chunk must not lose the whole review.
+      failedChunks++;
+      log(`review: chunk failed: ${(e as Error).message}`);
+      continue;
+    }
     try {
       found = found.concat((JSON.parse(out) as { findings?: RawFinding[] }).findings ?? []);
     } catch {
@@ -121,12 +131,13 @@ export async function reviewLogs(db: Db, cfg: Config, clients: Map<string, Dozzl
     ).run(now, now, now, instanceId, f.key, f.severity ?? "medium", JSON.stringify(f.containers ?? []), f.headline, f.why ?? null, f.fix ?? null);
   }
   let resolved = 0;
-  for (const k of known) {
+  // A failed chunk means some containers were not reviewed: their findings are not "gone".
+  for (const k of failedChunks ? [] : known) {
     if (!seenKeys.has(k.fingerprint)) {
       db.prepare("UPDATE findings SET status='resolved', resolved_at=?, updated=? WHERE fingerprint=?").run(now, now, k.fingerprint);
       resolved++;
     }
   }
-  log(`review: ${evidence.length} containers with warnings, ${found.length} findings, ${resolved} resolved`);
+  log(`review: ${evidence.length} containers with warnings, ${chunks.length} chunks (${failedChunks} failed), ${found.length} findings, ${resolved} resolved`);
   return { open: found.length, resolved };
 }
