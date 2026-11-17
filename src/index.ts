@@ -14,8 +14,8 @@ import type { PageCtx } from "./web/ui.ts";
 import { pickLang } from "./web/i18n.ts";
 import { configFromEnv, OidcGate } from "./auth/oidc-gate.ts";
 import { reviewLogs, summarizeAlert, askAbout } from "./llm/review.ts";
-import { fetchLogs } from "./web/logfetch.ts";
-import { queryLogs } from "./store/logindex.ts";
+import { fetchLogs, tailContainer } from "./web/logfetch.ts";
+import { insertLines, queryLogs } from "./store/logindex.ts";
 import { startLogIngest } from "./logs/ingest.ts";
 import { createToken, findToken, listTokens, recordCall, revokeToken, toolOf } from "./mcp/tokens.ts";
 import { clearMute, isMuted, muteDeadline, muteUntil, setMuteUntil } from "./notify/mute.ts";
@@ -436,8 +436,20 @@ async function main(): Promise<void> {
           const container = q.get("container") || parsed.container;
           const fromN = Number(q.get("from"));
           const toN = Number(q.get("to"));
-          if (q.get("live") === "1") pc.refreshSec = 5;
+          const zoomed = (Number.isFinite(fromN) && fromN > 0) || (Number.isFinite(toN) && toN > 0);
+          const tailing = Boolean(container) && !zoomed && q.get("live") !== "0";
+          if (tailing) pc.refreshSec = 5;
           const t0 = Date.now();
+          let tailRows: { ts: number; level: string; container: string; message: string }[] | undefined;
+          if (container && !zoomed) {
+            try {
+              const tail = await tailContainer(db, clients, { container, query: parsed.query, levels: parsed.levels, limit: 200 });
+              if (tail.store.length) insertLines(db, tail.store);
+              if (tail.rows.length) tailRows = tail.rows;
+            } catch (e) {
+              log(`tail ${container}: ${(e as Error).message}`);
+            }
+          }
           const fetched = queryLogs(db, {
             container,
             levels: parsed.levels,
@@ -447,6 +459,7 @@ async function main(): Promise<void> {
             now: Date.now(),
             limit: 200,
           });
+          if (tailRows) fetched.rows = tailRows;
           html = ui.logsPage(pc, { ...fetched, ms: Date.now() - t0 });
         } else if (sub === "/instances") {
           html = ui.instancesPage(pc, await instanceVersions());

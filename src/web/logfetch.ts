@@ -27,6 +27,62 @@ export interface LogFetch {
 /** How many running containers an "all containers" search may read. */
 export const LOG_CAP = 24;
 
+type StoredTail = {
+  instance_id: string;
+  host: string;
+  container_id: string;
+  container_name: string;
+  ts: number;
+  level: string;
+  message: string;
+};
+
+/**
+ * Newest lines of one container, the page Cloud calls Tailing.
+ * No time window: Dozzle's log tool then reads the last minutes and keeps the
+ * newest `limit`. A quiet container (nothing in that window) is read once more
+ * over the last day. The index backfill is still on the oldest page, so the
+ * table must not read it for this.
+ */
+export async function tailContainer(
+  db: Db,
+  clients: Map<string, DozzleClient>,
+  o: { container: string; query?: string; levels?: string[]; limit: number },
+): Promise<{ rows: LogHit[]; store: StoredTail[] }> {
+  const target = resolveContainer(db, o.container)[0];
+  if (!target) return { rows: [], store: [] };
+  const cl = clients.get(target.instance_id);
+  if (!cl) return { rows: [], store: [] };
+  const pack = (lines: { ts: number; level: string; message: string }[]) => {
+    const packed: { row: LogHit; store: StoredTail }[] = [];
+    for (const l of lines) {
+      if (!Number.isFinite(l.ts) || l.ts <= 0 || !l.message) continue;
+      const row = { ts: l.ts, level: l.level, container: target.name, message: l.message };
+      packed.push({
+        row,
+        store: {
+          instance_id: target.instance_id,
+          host: target.host,
+          container_id: target.id,
+          container_name: target.name,
+          ts: l.ts,
+          level: l.level,
+          message: l.message,
+        },
+      });
+    }
+    packed.sort((a, b) => b.row.ts - a.row.ts);
+    const shown = packed.slice(0, o.limit);
+    return { rows: shown.map((p) => p.row), store: shown.map((p) => p.store) };
+  };
+  const base = { host: target.host, id: target.id, query: o.query, levels: o.levels, limit: o.limit };
+  let got = pack(await cl.containerLines(base));
+  if (!got.rows.length && !o.query) {
+    got = pack(await cl.containerLines({ ...base, from: new Date(Date.now() - 86_400_000) }));
+  }
+  return got;
+}
+
 interface Target {
   instance_id: string;
   id: string;

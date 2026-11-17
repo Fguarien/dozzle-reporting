@@ -89,14 +89,35 @@ describe("instances and metrics", () => {
 });
 
 describe("logs, findings, alerts", () => {
-  it("shows the container filter, the live switch and the loaded lines", () => {
+  it("shows the container filter, Tailing on one container, and the loaded lines", () => {
     const c = page();
     c.db.prepare("INSERT INTO containers(instance_id,id,host,name,state,first_seen,last_seen) VALUES(?,?,?,?,?,?,?)").run("main", "n", "local", "nginx", "running", now, now);
     const bare = logsPage(c);
     expect(bare).toContain("All containers");
-    expect(bare).toContain(">Live<");
+    expect(bare).not.toContain(">Live<");
+    expect(bare).not.toContain(">Tailing<");
     expect(bare).toContain("nginx");
     expect(bare).not.toContain("events loaded");
+    const one = {
+      rows: [{ ts: now - 1000, level: "info", container: "nginx", message: "connection received" }],
+      ms: 10,
+      from: now - 86_400_000,
+      to: now,
+      total: 16468,
+    };
+    const selected = logsPage({ ...c, query: new URLSearchParams("container=nginx") }, one);
+    expect(selected).toContain('class="pill tail"');
+    expect(selected).toContain('href="/reporting/logs?container=nginx&live=0"');
+    expect(selected).toContain(">Tailing<");
+    expect(selected).toContain('class="tailmark"');
+    const paused = logsPage({ ...c, query: new URLSearchParams("container=nginx&live=0") }, one);
+    expect(paused).not.toContain('class="pill tail"');
+    expect(paused).not.toContain('class="tailmark"');
+    expect(paused).toContain(">Tailing<");
+    expect(paused).toContain('name="live" value="0"');
+    const zoomed = logsPage({ ...c, query: new URLSearchParams("container=nginx&from=1&to=2") });
+    expect(zoomed).not.toContain('class="pill tail"');
+    expect(zoomed).toContain('href="/reporting/logs?container=nginx"');
     const html = logsPage(c, {
       rows: [{ ts: now - 60_000, level: "info", container: "authentik-server", message: '127.0.0.1 - - "GET / HTTP/1.1" 302' }],
       ms: 12,

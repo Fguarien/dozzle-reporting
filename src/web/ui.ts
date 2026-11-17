@@ -155,8 +155,11 @@ pre{white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,SFMo
 .logtbl{width:100%;font-size:13px}.logtbl td:first-child{white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums}
 .logtools{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:8px}
 .logtools select,.logbar select{border-radius:999px;background:var(--bg);border:1px solid var(--line);padding:6px 10px}
-.pill{border:1px solid var(--line);border-radius:999px;padding:6px 12px;background:var(--bg);color:var(--fg);text-decoration:none;font-size:13px}
+.pill{border:1px solid var(--line);border-radius:999px;padding:6px 12px;background:var(--bg);color:var(--fg);text-decoration:none;font-size:13px;display:inline-flex;align-items:center;gap:6px}
 .pill.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.pill.tail{border-color:var(--ok);color:var(--ok);background:transparent}
+.tailmark{margin-left:auto;color:var(--ok);font-size:12px}
+.tailmark:before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px;vertical-align:1px}
 .vol{display:flex;align-items:flex-end;gap:2px;height:84px;padding:8px 4px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:4px 0 8px}
 .vol i{flex:1;display:flex;flex-direction:column-reverse;min-height:2px;border-radius:2px 2px 0 0;overflow:hidden;background:color-mix(in srgb,var(--line) 65%,transparent)}
 .vol i b{display:block;width:100%}
@@ -1206,19 +1209,25 @@ export function logsPage(c: PageCtx, result?: LogSearch): string {
      ) WHERE name!='' ORDER BY name COLLATE NOCASE LIMIT 2000`,
   ).all() as { name: string }[];
   const selected = q.get("container") ?? "";
-  const live = q.get("live") === "1";
   const qVal = q.get("q") ?? "";
   const fromQ = q.get("from") ?? "";
   const toQ = q.get("to") ?? "";
-  const hidden = `${qVal ? `<input type="hidden" name="q" value="${esc(qVal)}">` : ""}${fromQ ? `<input type="hidden" name="from" value="${esc(fromQ)}">` : ""}${toQ ? `<input type="hidden" name="to" value="${esc(toQ)}">` : ""}${live ? `<input type="hidden" name="live" value="1">` : ""}`;
+  const zoomed = Boolean(fromQ || toQ);
+  const paused = q.get("live") === "0";
+  const tailing = Boolean(selected) && !zoomed && !paused;
+  const hidden = `${qVal ? `<input type="hidden" name="q" value="${esc(qVal)}">` : ""}${fromQ ? `<input type="hidden" name="from" value="${esc(fromQ)}">` : ""}${toQ ? `<input type="hidden" name="to" value="${esc(toQ)}">` : ""}${paused ? `<input type="hidden" name="live" value="0">` : ""}`;
   const keep = new URLSearchParams();
   if (qVal) keep.set("q", qVal);
   if (selected) keep.set("container", selected);
   if (fromQ) keep.set("from", fromQ);
   if (toQ) keep.set("to", toQ);
   const liveHref = new URLSearchParams(keep);
-  if (live) liveHref.delete("live");
-  else liveHref.set("live", "1");
+  if (tailing) liveHref.set("live", "0");
+  else {
+    liveHref.delete("live");
+    liveHref.delete("from");
+    liveHref.delete("to");
+  }
   const rows = result?.rows ?? [];
   const total = result ? (result.total ?? rows.length) : 0;
   const bars = result ? (result.bars ?? logBars(rows, result.from, result.to, 48)) : [];
@@ -1245,7 +1254,7 @@ export function logsPage(c: PageCtx, result?: LogSearch): string {
       : "";
   const dash = "—";
   const table = result
-    ? `<div class="loaded"><b>${L("eventsLoaded", { n: rows.length })}</b><span class="muted">${L("loadedIn", { ms: result.ms })}</span></div>
+    ? `<div class="loaded"><b>${L("eventsLoaded", { n: rows.length })}</b><span class="muted">${L("loadedIn", { ms: result.ms })}</span>${tailing ? `<span class="tailmark">${L("tailing")}</span>` : ""}</div>
        ${rows.length ? "" : `<p class="muted">${L("noLogMatch")}</p>`}
        <table class="logtbl"><tr><th></th><th>${L("when")}</th><th>${L("container")}</th><th>${L("level")}</th><th>${L("method")}</th><th>${L("message")}</th><th>${L("status")}</th><th>${L("duration")}</th></tr>${rows
          .map((r) => {
@@ -1264,13 +1273,13 @@ export function logsPage(c: PageCtx, result?: LogSearch): string {
 <form method="get" action="${b}/logs" class="logtools">${ico("boxes")}
 <select name="container" onchange="this.form.submit()"><option value="">${L("allContainers")}</option>${names.map((n) => `<option value="${esc(n.name)}" ${n.name === selected ? "selected" : ""}>${esc(n.name)}</option>`).join("")}</select>
 ${hidden}
-<a class="pill ${live ? "on" : ""}" href="${b}/logs?${liveHref}">${ico("play")}${L("live")}</a>
+${selected ? `<a class="pill ${tailing ? "tail" : ""}" href="${b}/logs?${liveHref}">${tailing ? ico("pause") : ico("play")}${L("tailing")}</a>` : ""}
 </form></div>
 <form class="logbar" method="get" action="${b}/logs">${ico("search")}<span class="logsql">${L("logsql")}</span>
 <input type="hidden" name="container" value="${esc(selected)}">
 ${fromQ ? `<input type="hidden" name="from" value="${esc(fromQ)}">` : ""}
 ${toQ ? `<input type="hidden" name="to" value="${esc(toQ)}">` : ""}
-${live ? `<input type="hidden" name="live" value="1">` : ""}
+${paused ? `<input type="hidden" name="live" value="0">` : ""}
 <input name="q" placeholder="level:error AND container_name:nginx" value="${esc(qVal)}"></form>
 ${hist}
 ${note}
