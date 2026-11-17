@@ -22,6 +22,15 @@ services:
       # LLM_MODEL: mistral-large-latest
       # LLM_SUMMARY_MODEL: model for per-alert summaries (many calls/day); defaults to LLM_MODEL
       # LLM_LANGUAGE: en
+      # Mail is optional. Plain SMTP, no AUTH. Both host and from are required or mail stays off.
+      # SMTP_HOST: smtp.example.com
+      # SMTP_PORT: "587"
+      # SMTP_FROM: noreply@example.com
+      # NOTIFY_EMAIL: ops@example.com
+      # URL shown on the MCP tab. Empty hides it. Do not publish /mcp on the WAN.
+      # MCP_ADVERTISE_URL: http://dozzle-reporting.example:8095/mcp
+      # LITELLM_MCP_URL: http://litellm.example/mcp/
+      # NOTIFY_URL is the chat hub. JSON body is {channel,title,message}. The URL is never rendered.
       # Web UI login (recommended): any OIDC provider
       # OIDC_ISSUER: https://auth.example.com/application/o/dozzle-reporting/
       # OIDC_CLIENT_ID: dozzle-reporting

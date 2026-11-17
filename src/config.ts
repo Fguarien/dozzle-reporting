@@ -34,6 +34,15 @@ export interface Config {
   reviewHour: number;
   timezone: string;
   allowActions: boolean;
+  /** Plain SMTP relay. Absent until SMTP_HOST and SMTP_FROM are both set. */
+  smtp?: { host: string; port: number; from: string };
+  notifyEmail?: string;
+  /** LAN URL clients should paste. Never the public site: WAN /mcp is not published. */
+  mcpAdvertiseUrl?: string;
+  litellmMcpUrl?: string;
+  notifyChannel?: string;
+  /** True when NOTIFY_URL is set. The URL itself is not kept on this object. */
+  hubConfigured: boolean;
 }
 
 function env(name: string, def?: string): string | undefined {
@@ -76,6 +85,8 @@ export function loadConfig(): Config {
     ];
   }
   const llmUrl = env("LLM_BASE_URL");
+  const smtpHost = env("SMTP_HOST");
+  const smtpFrom = env("SMTP_FROM");
   return {
     instances,
     dbPath: env("DB_PATH", "./dozzle-reporting.db")!,
@@ -92,5 +103,11 @@ export function loadConfig(): Config {
     reviewHour: Number(env("REVIEW_HOUR", "21")),
     timezone: env("TZ", "UTC")!,
     allowActions: env("ALLOW_ACTIONS", "true") !== "false",
+    smtp: smtpHost && smtpFrom ? { host: smtpHost, port: Number(env("SMTP_PORT", "587")), from: smtpFrom } : undefined,
+    notifyEmail: env("NOTIFY_EMAIL"),
+    mcpAdvertiseUrl: env("MCP_ADVERTISE_URL"),
+    litellmMcpUrl: env("LITELLM_MCP_URL"),
+    notifyChannel: env("NOTIFY_CHANNEL"),
+    hubConfigured: Boolean(env("NOTIFY_URL")),
   };
 }

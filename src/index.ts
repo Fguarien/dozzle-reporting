@@ -4,7 +4,7 @@ import { timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { loadConfig, type Config } from "./config.ts";
-import { openDb, prune, kvGet, kvSet, type Db } from "./store/db.ts";
+import { openDb, prune, kvGet, kvSet, seedSnapshots, type Db } from "./store/db.ts";
 import { DozzleClient } from "./dozzle/client.ts";
 import { Collector } from "./collector.ts";
 import { Alerts, type DozzleNotification } from "./alerts.ts";
@@ -14,6 +14,10 @@ import type { PageCtx } from "./web/ui.ts";
 import { pickLang } from "./web/i18n.ts";
 import { configFromEnv, OidcGate } from "./auth/oidc-gate.ts";
 import { reviewLogs, summarizeAlert, askAbout } from "./llm/review.ts";
+import { createToken, findToken, listTokens, recordCall, revokeToken, toolOf } from "./mcp/tokens.ts";
+import { clearMute, isMuted, muteDeadline, muteUntil, setMuteUntil } from "./notify/mute.ts";
+import { digestText } from "./notify/digest.ts";
+import { sendMail } from "./notify/smtp.ts";
 
 /** Run one MCP tool in-process (the UI reuses the tools so both answer the same way). */
 async function callTool(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<string> {
@@ -86,6 +90,9 @@ export function buildToolServer(ctx: ToolContext): { server: McpServer; registry
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const db = openDb(cfg.dbPath);
+  const seedT = Date.now();
+  const seeded = seedSnapshots(db);
+  log(`snapshots live=${seeded.live} roll=${seeded.roll} in ${Date.now() - seedT}ms`);
   const clients = new Map(cfg.instances.map((i) => [i.id, new DozzleClient(i)]));
   const webhookUrl = (process.env["WEBHOOK_BASE_URL"] ?? `http://localhost:${cfg.port}`).replace(/\/$/, "");
 
@@ -104,21 +111,26 @@ async function main(): Promise<void> {
         }
       }
       log(`alert #${a.id} sent: ${title}`);
-      await notify(title, `${body}\n\n${cfg.publicUrl}${cfg.basePath}/alerts`);
+      await notify(db, cfg, title, `${body}\n\n${cfg.publicUrl}${cfg.basePath}/alerts`);
     },
   });
 
-  // Daily log review at REVIEW_HOUR (local TZ). Checked every minute; runs once per day.
-  if (cfg.llm) {
-    setInterval(() => {
-      const h = Number(new Date().toLocaleString("en-GB", { timeZone: cfg.timezone, hour: "2-digit", hour12: false }));
-      const day = new Date().toLocaleDateString("sv-SE", { timeZone: cfg.timezone });
-      if (h === cfg.reviewHour && kvGet(db, "review:last") !== day) {
-        kvSet(db, "review:last", day);
-        reviewLogs(db, cfg, clients, log).catch((e) => log(`review failed: ${(e as Error).message}`));
-      }
-    }, 60_000).unref();
-  }
+  // Review and the daily report share REVIEW_HOUR. Each runs once per local day.
+  setInterval(() => {
+    const h = Number(new Date().toLocaleString("en-GB", { timeZone: cfg.timezone, hour: "2-digit", hour12: false }));
+    if (h !== cfg.reviewHour) return;
+    const day = new Date().toLocaleDateString("sv-SE", { timeZone: cfg.timezone });
+    if (cfg.llm && kvGet(db, "review:last") !== day) {
+      kvSet(db, "review:last", day);
+      reviewLogs(db, cfg, clients, log).catch((e) => log(`review failed: ${(e as Error).message}`));
+    }
+    if (kvGet(db, "digest:last") !== day) {
+      kvSet(db, "digest:last", day);
+      const lang = process.env["LLM_LANGUAGE"] === "fr" ? "fr" : "en";
+      const digest = digestText(db, lang);
+      if (digest) void notify(db, cfg, digest.subject, digest.text);
+    }
+  }, 60_000).unref();
 
   const ctx: ToolContext = {
     db,
@@ -126,6 +138,23 @@ async function main(): Promise<void> {
     clients,
     alerts,
     dispatcherId: (id) => ensureDispatcher(db, cfg, clients.get(id)!, webhookUrl),
+  };
+
+  const bootTools = buildToolServer(ctx);
+  const toolCount = bootTools.registry.names.length;
+  void bootTools.server.close();
+  let versionAt = 0;
+  let versionMap = new Map<string, string>();
+  const instanceVersions = async (): Promise<Map<string, string>> => {
+    if (versionMap.size && Date.now() - versionAt < 600_000) return versionMap;
+    const versions = new Map<string, string>();
+    await Promise.all([...clients.values()].map(async (c) => {
+      const v = await c.version().catch(() => "");
+      if (v) versions.set(c.id, v);
+    }));
+    versionAt = Date.now();
+    versionMap = versions;
+    return versions;
   };
 
   const collectors = [...clients.values()].map((c) => new Collector(db, c, { bucketSeconds: cfg.bucketSeconds, log }));
@@ -148,18 +177,27 @@ async function main(): Promise<void> {
       }
 
       if (path === "/mcp" || path === `${cfg.basePath}/mcp`) {
-        if (cfg.mcpToken && !safeEq(bearer(req) ?? "", cfg.mcpToken)) return send(res, 401, "unauthorized");
+        const presented = bearer(req) ?? "";
+        let who: { id: number | null; name: string } | undefined;
+        if (presented && cfg.mcpToken && safeEq(presented, cfg.mcpToken)) who = { id: null, name: "litellm" };
+        else if (presented) who = findToken(db, presented);
+        const minted = (db.prepare("SELECT count(*) n FROM api_tokens WHERE revoked=0").get() as { n: number }).n;
+        if ((cfg.mcpToken || minted > 0) && !who) return send(res, 401, "unauthorized");
         if (req.method !== "POST") return send(res, 405, "method not allowed");
         const body = JSON.parse(await readBody(req));
-        // Stateless: a fresh server + transport per request.
+        const t0 = Date.now();
         const { server } = buildToolServer(ctx);
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
         res.on("close", () => {
           void transport.close();
           void server.close();
         });
-        await server.connect(transport);
-        await transport.handleRequest(req, res, body);
+        try {
+          await server.connect(transport);
+          await transport.handleRequest(req, res, body);
+        } finally {
+          if (who) recordCall(db, who, toolOf(body), Date.now() - t0);
+        }
         return;
       }
 
@@ -217,6 +255,33 @@ async function main(): Promise<void> {
         if (req.method === "POST") {
           const form = new URLSearchParams(await readBody(req, 32_000));
           const action = form.get("action") ?? "";
+          if (sub === "/integrations") {
+            if (action === "create_token") {
+              try {
+                kvSet(db, "token:flash", createToken(db, form.get("name") ?? "").secret);
+              } catch (e) {
+                kvSet(db, "token:err", (e as Error).message.slice(0, 120));
+              }
+              return seeOther(`${cfg.basePath}/integrations?tab=mcp`);
+            }
+            if (action === "revoke_token") {
+              const id = Number(form.get("id"));
+              if (Number.isInteger(id) && id > 0) revokeToken(db, id);
+              return seeOther(`${cfg.basePath}/integrations?tab=mcp`);
+            }
+            if (action === "mute_for") {
+              try {
+                setMuteUntil(db, muteDeadline(form.get("for") ?? "", Date.now(), cfg.timezone));
+              } catch {
+                /* unknown span */
+              }
+              return seeOther(`${cfg.basePath}/integrations`);
+            }
+            if (action === "unmute") {
+              clearMute(db);
+              return seeOther(`${cfg.basePath}/integrations`);
+            }
+          }
           const question = form.get("q") ?? "";
           const runAsk = async (topic: string, evidence: string): Promise<{ ask?: string; notice?: string }> => {
             if (!cfg.llm) return { notice: pc.lang === "fr" ? "Demander exige LLM_BASE_URL." : "Ask needs LLM_BASE_URL." };
@@ -345,11 +410,15 @@ async function main(): Promise<void> {
           }
           html = ui.logsPage(pc, result);
         } else if (sub === "/instances") {
-          const versions = new Map<string, string>();
-          await Promise.all([...clients.values()].map(async (c) => versions.set(c.id, await c.version().catch(() => ""))));
-          for (const [k, v] of versions) if (!v) versions.delete(k);
-          html = ui.instancesPage(pc, versions);
-        } else if (sub === "/integrations") html = ui.integrationsPage(pc);
+          html = ui.instancesPage(pc, await instanceVersions());
+        } else if (sub === "/integrations") {
+          const flash = kvGet(db, "token:flash");
+          const tokenError = kvGet(db, "token:err");
+          if (flash) db.prepare("DELETE FROM kv WHERE k='token:flash'").run();
+          if (tokenError) db.prepare("DELETE FROM kv WHERE k='token:err'").run();
+          const calls = db.prepare("SELECT ts, token_name, tool, ms FROM mcp_calls ORDER BY ts DESC LIMIT 15").all() as { ts: number; token_name: string; tool: string; ms: number }[];
+          html = ui.integrationsPage(pc, { freshToken: flash, tokenError, tokens: listTokens(db), calls, muteUntil: muteUntil(db), toolCount });
+        }
         else if (sub === "/ask") html = ui.askPage(pc);
         if (html) {
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "same-origin" });
@@ -375,8 +444,16 @@ async function main(): Promise<void> {
   process.on("SIGINT", stop);
 }
 
-/** Optional push: NOTIFY_URL receives a POST (ntfy-compatible: Title header, text body). */
-async function notify(title: string, body: string): Promise<void> {
+/** Hub POST plus optional SMTP. A global mute skips both. The URL is read here and never rendered. */
+async function notify(db: Db, cfg: Config, title: string, body: string): Promise<void> {
+  if (isMuted(db)) return;
+  if (cfg.smtp && cfg.notifyEmail) {
+    try {
+      await sendMail({ host: cfg.smtp.host, port: cfg.smtp.port, from: cfg.smtp.from, to: cfg.notifyEmail, subject: title.slice(0, 200), text: body.slice(0, 4000) });
+    } catch (e) {
+      log(`mail failed: ${(e as Error).message}`);
+    }
+  }
   const url = process.env["NOTIFY_URL"];
   if (!url) return;
   try {

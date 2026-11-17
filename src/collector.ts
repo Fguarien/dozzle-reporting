@@ -110,9 +110,14 @@ export class Collector {
   handle(event: string, data: string): void {
     this.lastMessageAt = this.now();
     switch (event) {
-      case "containers-changed":
-        for (const c of JSON.parse(data) as DzContainer[]) this.upsert(c, "snapshot");
+      case "containers-changed": {
+        // Authoritative for the hosts it names. An empty payload is a parse miss, not "everyone left".
+        const list = JSON.parse(data) as DzContainer[];
+        if (list.length === 0) break;
+        for (const c of list) this.upsert(c, "snapshot");
+        this.retireMissing(list);
         break;
+      }
       case "container-updated":
         this.upsert(JSON.parse(data) as DzContainer, "update");
         break;
@@ -168,6 +173,28 @@ export class Collector {
            state=excluded.state,health=excluded.health,config_hash=excluded.config_hash,config_json=excluded.config_json,last_seen=excluded.last_seen`,
       )
       .run(this.client.id, c.id, c.host, c.name, c.image, imageId, c.state, c.health ?? null, configHash, JSON.stringify(slim(c)), now, now);
+  }
+
+  /** Drop ids this host no longer reports. Hosts absent from the payload are left alone. */
+  private retireMissing(list: DzContainer[]): void {
+    const byHost = new Map<string, Set<string>>();
+    for (const c of list) {
+      if (!c.host) continue;
+      let ids = byHost.get(c.host);
+      if (!ids) byHost.set(c.host, (ids = new Set()));
+      ids.add(c.id);
+    }
+    const seen = this.db.prepare("SELECT id FROM containers WHERE instance_id=? AND host=? AND state='running'");
+    const retire = this.db.prepare("UPDATE containers SET state='exited' WHERE instance_id=? AND id=?");
+    const dropLive = this.db.prepare("DELETE FROM live_metrics WHERE instance_id=? AND container_id=?");
+    for (const [host, ids] of byHost) {
+      for (const row of seen.all(this.client.id, host) as { id: string }[]) {
+        if (ids.has(row.id)) continue;
+        retire.run(this.client.id, row.id);
+        dropLive.run(this.client.id, row.id);
+        this.known.delete(row.id);
+      }
+    }
   }
 
   private event(e: DzEvent): void {
@@ -239,6 +266,28 @@ export class Collector {
       `INSERT OR REPLACE INTO metrics(ts,instance_id,container_id,container_name,host,cpu_avg,cpu_max,mem_avg,mem_max,mem_pct_avg,mem_pct_max,net_rx_bps,net_tx_bps,disk_r_bps,disk_w_bps,samples)
        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     );
+    const liveSt = this.db.prepare(
+      `INSERT OR REPLACE INTO live_metrics(instance_id,container_id,container_name,host,ts,cpu,cpu_max,mem,mem_pct,net_rx,net_tx,disk_r,disk_w)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    );
+    const rollSt = this.db.prepare(
+      `INSERT INTO metric_roll(ts,instance_id,container_id,container_name,host,cpu_avg,cpu_max,mem_avg,mem_max,mem_pct_avg,net_rx,net_tx,disk_r,disk_w,samples)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(ts, instance_id, container_id) DO UPDATE SET
+         container_name=excluded.container_name, host=excluded.host,
+         cpu_avg=(metric_roll.cpu_avg*metric_roll.samples + excluded.cpu_avg*excluded.samples)/(metric_roll.samples+excluded.samples),
+         cpu_max=max(metric_roll.cpu_max, excluded.cpu_max),
+         mem_avg=(metric_roll.mem_avg*metric_roll.samples + excluded.mem_avg*excluded.samples)/(metric_roll.samples+excluded.samples),
+         mem_max=max(metric_roll.mem_max, excluded.mem_max),
+         mem_pct_avg=(metric_roll.mem_pct_avg*metric_roll.samples + excluded.mem_pct_avg*excluded.samples)/(metric_roll.samples+excluded.samples),
+         net_rx=(metric_roll.net_rx*metric_roll.samples + excluded.net_rx*excluded.samples)/(metric_roll.samples+excluded.samples),
+         net_tx=(metric_roll.net_tx*metric_roll.samples + excluded.net_tx*excluded.samples)/(metric_roll.samples+excluded.samples),
+         disk_r=(metric_roll.disk_r*metric_roll.samples + excluded.disk_r*excluded.samples)/(metric_roll.samples+excluded.samples),
+         disk_w=(metric_roll.disk_w*metric_roll.samples + excluded.disk_w*excluded.samples)/(metric_roll.samples+excluded.samples),
+         samples=metric_roll.samples+excluded.samples`,
+    );
+    const hour = Math.floor(this.bucketStart / 3_600_000) * 3_600_000;
+    const seenAt = this.now();
     const rate = (a: Acc, k: "rx" | "tx" | "dr" | "dw") => {
       if (!a.first || !a.last || a.last.t <= a.first.t) return 0;
       const d = a.last[k] - a.first[k];
@@ -247,7 +296,16 @@ export class Collector {
     this.db.exec("BEGIN");
     try {
       for (const [id, a] of this.acc) {
-        st.run(this.bucketStart, this.client.id, id, a.name, a.host, a.cpuSum / a.n, a.cpuMax, a.memSum / a.n, a.memMax, a.pctSum / a.n, a.pctMax, rate(a, "rx"), rate(a, "tx"), rate(a, "dr"), rate(a, "dw"), a.n);
+        const cpu = a.cpuSum / a.n;
+        const mem = a.memSum / a.n;
+        const pct = a.pctSum / a.n;
+        const rx = rate(a, "rx");
+        const tx = rate(a, "tx");
+        const dr = rate(a, "dr");
+        const dw = rate(a, "dw");
+        st.run(this.bucketStart, this.client.id, id, a.name, a.host, cpu, a.cpuMax, mem, a.memMax, pct, a.pctMax, rx, tx, dr, dw, a.n);
+        liveSt.run(this.client.id, id, a.name, a.host, seenAt, cpu, a.cpuMax, mem, pct, rx, tx, dr, dw);
+        rollSt.run(hour, this.client.id, id, a.name, a.host, cpu, a.cpuMax, mem, a.memMax, pct, rx, tx, dr, dw, a.n);
       }
       this.db.exec("COMMIT");
     } catch (e) {

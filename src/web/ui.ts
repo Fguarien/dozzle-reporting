@@ -129,8 +129,11 @@ pre{white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,SFMo
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 4px;align-items:center}
 .filters input,.filters select{border-radius:999px;background:var(--soft);padding:7px 12px}
 .pills{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
-.pills a,.pills span{border:1px solid var(--line);border-radius:999px;padding:6px 12px;text-decoration:none;font-size:13px;background:var(--bg);color:var(--fg);display:inline-block}
-.pills a:hover{background:var(--hover)}.pills a.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.pills a,.pills span,.pills button{border:1px solid var(--line);border-radius:999px;padding:6px 12px;text-decoration:none;font-size:13px;background:var(--bg);color:var(--fg);display:inline-block;cursor:pointer;font:inherit}
+.pills a:hover,.pills button:hover{background:var(--hover)}.pills a.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.mutebox{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:14px 16px;margin:8px 0 18px}
+.mutebox h2{margin:0 0 6px;font-size:15px}
+.secret{font-family:ui-monospace,Menlo,monospace;background:var(--soft);border-radius:8px;padding:10px 12px;word-break:break-all}
 .hist{display:flex;align-items:flex-end;gap:3px;height:72px;padding:8px 4px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:10px 0 16px}
 .hist i{flex:1;display:block;border-radius:2px 2px 0 0;min-height:2px;background:var(--ok)}
 .hist i.warn{background:var(--warn)}.hist i.err{background:var(--err)}.hist i.mix{background:linear-gradient(to top,var(--ok) 40%,var(--warn) 70%,var(--err) 100%)}
@@ -278,32 +281,42 @@ export function spark(values: number[], color: string, w = 120, h = 28): string 
   return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polygon points="0,${h} ${pts.join(" ")} ${w},${h}" fill="${color}" opacity=".18"/><polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
 }
 
+/** A stat older than this is not "now". Stats do not refresh last_seen, so this window is the freshness test. */
+const FRESH_MS = 180_000;
+
+/** Dozzle reports `v11.3.4` already. Prefixing another v produced `vv11.3.4`. */
+export function verLabel(v: string | undefined | null): string {
+  const s = String(v ?? "").trim().replace(/^v+/i, "");
+  return s ? `v${s}` : "?";
+}
+
+/** Dozzle's own engine is `type=local`. Agents are `type=agent`. */
+export function hostRole(type: string): "server" | "agent" {
+  return type === "local" || type === "server" ? "server" : "agent";
+}
+
+function stride<T>(values: T[], points: number): T[] {
+  if (values.length <= points) return values;
+  const step = Math.ceil(values.length / points);
+  return values.filter((_, i) => i % step === 0);
+}
+
 function seriesFor(db: Db, instance: string, host: string, name: string, from: number, field: "cpu_avg" | "mem_avg", points = 30): number[] {
-  from = dataFrom(db, from);
-  const step = Math.max(30_000, Math.ceil((Date.now() - from) / points / 30_000) * 30_000);
-  return (db.prepare(`SELECT avg(${field}) v FROM metrics WHERE instance_id=? AND host=? AND container_name=? AND ts>=? GROUP BY CAST(ts / ? AS INTEGER) ORDER BY ts`).all(instance, host, name, from, step) as { v: number }[]).map((r) => r.v);
+  const rows = db.prepare(`SELECT ${field} v FROM metric_roll WHERE instance_id=? AND host=? AND container_name=? AND ts>=? ORDER BY ts`).all(instance, host, name, from) as { v: number | null }[];
+  return stride(rows.map((r) => r.v ?? 0), points);
 }
 
-/** Span actually covered by data: a 24 h window over 1 h of history must not draw 2 points. */
-function dataFrom(db: Db, from: number): number {
-  const r = db.prepare("SELECT min(ts) t FROM metrics WHERE ts>=?").get(from) as { t: number | null };
-  return Math.max(from, r.t ?? from);
-}
-
-function seriesAll(db: Db, from: number, now: number, points = 24): Map<string, { cpu: number[]; mem: number[] }> {
-  from = dataFrom(db, from);
-  const step = Math.max(30_000, Math.ceil((now - from) / points / 30_000) * 30_000);
-  const rows = db
-    .prepare(`SELECT instance_id i, host h, container_name n, CAST(ts / ? AS INTEGER) b, avg(cpu_avg) c, avg(mem_avg) m FROM metrics WHERE ts>=? GROUP BY i, h, n, b ORDER BY i, h, n, b`)
-    .all(step, from) as { i: string; h: string; n: string; c: number; m: number }[];
+function seriesAll(db: Db, from: number, points = 48): Map<string, { cpu: number[]; mem: number[] }> {
+  const rows = db.prepare("SELECT instance_id i, host h, container_name n, cpu_avg c, mem_avg m FROM metric_roll WHERE ts>=? ORDER BY i, h, n, ts").all(from) as { i: string; h: string; n: string; c: number | null; m: number | null }[];
   const out = new Map<string, { cpu: number[]; mem: number[] }>();
   for (const r of rows) {
     const k = `${r.i}|${r.h}|${r.n}`;
     let e = out.get(k);
     if (!e) out.set(k, (e = { cpu: [], mem: [] }));
-    e.cpu.push(r.c);
-    e.mem.push(r.m);
+    e.cpu.push(r.c ?? 0);
+    e.mem.push(r.m ?? 0);
   }
+  for (const [k, e] of out) out.set(k, { cpu: stride(e.cpu, points), mem: stride(e.mem, points) });
   return out;
 }
 
@@ -311,18 +324,19 @@ function hostNames(db: Db): Map<string, string> {
   return new Map((db.prepare("SELECT id, name FROM hosts").all() as { id: string; name: string }[]).map((r) => [r.id, r.name]));
 }
 
-function hostInfo(db: Db, instance: string, id: string): { name: string; type: string; mem: number; ncpu: number } {
+function hostInfo(db: Db, instance: string, id: string): { name: string; type: string; mem: number; ncpu: number; agentVersion: string } {
   const r = db.prepare("SELECT name, json FROM hosts WHERE instance_id=? AND id=?").get(instance, id) as { name: string; json: string } | undefined;
-  let type = "", mem = 0, ncpu = 0;
+  let type = "", mem = 0, ncpu = 0, agentVersion = "";
   try {
-    const j = JSON.parse(r?.json ?? "{}") as { type?: string; memTotal?: number; nCPU?: number };
+    const j = JSON.parse(r?.json ?? "{}") as { type?: string; memTotal?: number; nCPU?: number; agentVersion?: string };
     type = String(j.type ?? "");
     mem = Number(j.memTotal ?? 0);
     ncpu = Number(j.nCPU ?? 0);
+    agentVersion = String(j.agentVersion ?? "");
   } catch {
     /* ignore */
   }
-  return { name: r?.name || id, type, mem, ncpu };
+  return { name: r?.name || id, type, mem, ncpu, agentVersion };
 }
 
 function hostMemTotal(db: Db): number {
@@ -338,17 +352,77 @@ function hostMemTotal(db: Db): number {
   return s;
 }
 
-/** Current CPU/mem of running containers (last 5 min), not a 24 h average of every row. */
+interface LiveRow {
+  instance_id: string;
+  host: string;
+  name: string;
+  cpu: number;
+  cpu_pk: number;
+  mem: number;
+  pct: number;
+}
+
+/** One row per container name. Docker CPU% is already "100 = one core". */
+function collapseLive(rows: LiveRow[]): LiveRow[] {
+  const m = new Map<string, LiveRow>();
+  for (const r of rows) {
+    const k = `${r.instance_id}|${r.host}|${r.name}`;
+    const e = m.get(k);
+    if (!e) m.set(k, { ...r });
+    else {
+      e.cpu += r.cpu;
+      e.mem += r.mem;
+      e.cpu_pk = Math.max(e.cpu_pk, r.cpu_pk);
+      e.pct = Math.max(e.pct, r.pct);
+    }
+  }
+  return [...m.values()];
+}
+
+function liveRows(db: Db, now: number, onlyRunning: boolean): LiveRow[] {
+  if (onlyRunning) {
+    return collapseLive(
+      db.prepare(
+        `SELECT l.instance_id, l.host, l.container_name name, l.cpu, l.cpu_max cpu_pk, l.mem, l.mem_pct pct
+         FROM live_metrics l
+         JOIN containers c ON c.instance_id=l.instance_id AND c.id=l.container_id AND c.state='running'
+         WHERE l.ts>=?`,
+      ).all(now - FRESH_MS) as unknown as LiveRow[],
+    );
+  }
+  return collapseLive(
+    db.prepare(
+      `SELECT r.instance_id, r.host, r.container_name name, r.cpu_avg cpu, r.cpu_max cpu_pk, r.mem_avg mem, r.mem_pct_avg pct
+       FROM metric_roll r
+       JOIN (SELECT instance_id, container_id, max(ts) ts FROM metric_roll GROUP BY instance_id, container_id) x
+         ON x.instance_id=r.instance_id AND x.container_id=r.container_id AND x.ts=r.ts`,
+    ).all() as unknown as LiveRow[],
+  );
+}
+
+/** Container-sum CPU (can exceed 100) and memory of containers that reported in the last 3 min. */
 function nowStats(db: Db, now: number): { cpu: number; mem: number; n: number } {
-  const from = now - 5 * 60_000;
-  return (db
-    .prepare(
-      `SELECT coalesce(sum(cpu),0) cpu, coalesce(sum(mem),0) mem, count(*) n FROM (
-         SELECT avg(m.cpu_avg) cpu, avg(m.mem_avg) mem
-         FROM containers c JOIN metrics m ON m.instance_id=c.instance_id AND m.container_id=c.id AND m.ts>=?
-         WHERE c.state='running' GROUP BY c.instance_id, c.id)`,
-    )
-    .get(from) ?? { cpu: 0, mem: 0, n: 0 }) as { cpu: number; mem: number; n: number };
+  const rows = liveRows(db, now, true);
+  return { cpu: rows.reduce((s, r) => s + r.cpu, 0), mem: rows.reduce((s, r) => s + r.mem, 0), n: rows.length };
+}
+
+/** Host utilization = sum(container CPU%) / nCPU. nCPU 0 keeps the raw sum. */
+function hostUtil(db: Db, instance: string, host: string, cpuSum: number): number {
+  const ncpu = hostInfo(db, instance, host).ncpu;
+  return ncpu > 0 ? cpuSum / ncpu : cpuSum;
+}
+
+/** Running containers this host still reports. Ghosts stay state=running until the next full snapshot. */
+function aliveCount(db: Db, instance: string, host: string, now: number): number {
+  const fresh = now - FRESH_MS;
+  const n = (db.prepare(
+    `SELECT count(*) n FROM live_metrics l
+     JOIN containers c ON c.instance_id=l.instance_id AND c.id=l.container_id AND c.state='running'
+     WHERE l.instance_id=? AND l.host=? AND l.ts>=?`,
+  ).get(instance, host, fresh) as { n: number }).n;
+  const any = (db.prepare("SELECT count(*) n FROM live_metrics WHERE ts>=?").get(fresh) as { n: number }).n;
+  if (any > 0) return n;
+  return (db.prepare("SELECT count(*) n FROM containers WHERE instance_id=? AND host=? AND state='running' AND last_seen>?").get(instance, host, now - 600_000) as { n: number }).n;
 }
 
 export interface LogRow {
@@ -431,15 +505,13 @@ function chart(
 }
 
 function seriesDetail(db: Db, instance: string, host: string, name: string, from: number, points = 96): { t: number; cpu: number; cpuPk: number; mem: number; memPk: number; pct: number; rx: number; tx: number; dr: number; dw: number }[] {
-  from = dataFrom(db, from);
-  const step = Math.max(30_000, Math.ceil((Date.now() - from) / points / 30_000) * 30_000);
-  return db
+  const rows = db
     .prepare(
-      `SELECT CAST(ts / ? AS INTEGER) * ? t, avg(cpu_avg) cpu, max(cpu_max) cpuPk, avg(mem_avg) mem, max(mem_max) memPk, avg(mem_pct_avg) pct,
-              avg(net_rx_bps) rx, avg(net_tx_bps) tx, avg(disk_r_bps) dr, avg(disk_w_bps) dw
-       FROM metrics WHERE instance_id=? AND host=? AND container_name=? AND ts>=? GROUP BY CAST(ts / ? AS INTEGER) ORDER BY t`,
+      `SELECT ts t, cpu_avg cpu, cpu_max cpuPk, mem_avg mem, mem_max memPk, mem_pct_avg pct, net_rx rx, net_tx tx, disk_r dr, disk_w dw
+       FROM metric_roll WHERE instance_id=? AND host=? AND container_name=? AND ts>=? ORDER BY ts`,
     )
-    .all(step, step, instance, host, name, from, step) as { t: number; cpu: number; cpuPk: number; mem: number; memPk: number; pct: number; rx: number; tx: number; dr: number; dw: number }[];
+    .all(instance, host, name, from) as { t: number; cpu: number; cpuPk: number; mem: number; memPk: number; pct: number; rx: number; tx: number; dr: number; dw: number }[];
+  return stride(rows, points);
 }
 
 function instanceName(c: PageCtx, id: string): string {
@@ -502,18 +574,17 @@ export function overview(c: PageCtx): string {
   const wk = db.prepare("SELECT sum(status='sent') s, sum(status<>'sent') q FROM alerts WHERE ts>=?").get(now - 7 * 24 * H) as { s: number | null; q: number | null };
   const s = wk.s ?? 0, q = wk.q ?? 0;
   const live = nowStats(db, now);
-  const topFrom = now - 24 * H;
-  const topRunning = (field: "cpu_avg" | "mem_avg") =>
-    db
+  const topRunning = (col: "cpu" | "mem") =>
+    (db
       .prepare(
-        `SELECT m.instance_id, m.host, m.container_name name, avg(m.${field}) v
-         FROM metrics m JOIN containers c ON c.instance_id=m.instance_id AND c.id=m.container_id AND c.state='running'
-         WHERE m.ts>=? GROUP BY m.instance_id, m.host, m.container_name ORDER BY v DESC LIMIT 5`,
+        `SELECT l.instance_id, l.host, l.container_name name, l.${col} v
+         FROM live_metrics l JOIN containers c ON c.instance_id=l.instance_id AND c.id=l.container_id AND c.state='running'
+         WHERE l.ts>=? ORDER BY v DESC LIMIT 5`,
       )
-      .all(topFrom) as { instance_id: string; host: string; name: string; v: number }[];
-  const topListLive = (field: "cpu_avg" | "mem_avg", color: string) =>
-    topRunning(field)
-      .map((r) => `<div class="kv"><span>${esc(r.name)}</span><span style="display:flex;gap:8px;align-items:center">${spark(seriesFor(db, r.instance_id, r.host, r.name, now - 24 * H, field), color, 88, 22)}<span class="mono">${field === "cpu_avg" ? pctS(r.v) : fmtBytes(r.v)}</span></span></div>`)
+      .all(now - FRESH_MS) as { instance_id: string; host: string; name: string; v: number }[]);
+  const topListLive = (col: "cpu" | "mem", color: string) =>
+    topRunning(col)
+      .map((r) => `<div class="kv"><span>${esc(r.name)}</span><span style="display:flex;gap:8px;align-items:center">${spark(seriesFor(db, r.instance_id, r.host, r.name, now - 24 * H, col === "cpu" ? "cpu_avg" : "mem_avg"), color, 88, 22)}<span class="mono">${col === "cpu" ? pctS(r.v) : fmtBytes(r.v)}</span></span></div>`)
       .join("");
   return layout(
     c,
@@ -532,8 +603,8 @@ ${nHappened ? `<p class="muted"><a class="link" href="${b}/alerts">${L("showAll"
 ${open.length ? open.map((f) => findingRow(c, f)).join("") : `<div class="card">✓ ${L("nothingToFix")}</div>`}
 <h2>${L("resources24h")} <a class="link" style="float:right;font-size:13px;font-weight:400" href="${b}/metrics">${L("allMetrics")}</a></h2>
 <div class="grid2">
-  <div><div class="stat">${ico("cpu")} ${L("cpu")}</div><div class="big">${pctS(live.cpu)}</div><div class="muted">${L("acrossN", { n: live.n })}</div>${topListLive("cpu_avg", "var(--cpu)")}</div>
-  <div><div class="stat">${ico("memory")} ${L("memory")}</div><div class="big">${fmtBytes(live.mem)}</div><div class="muted">${L("acrossN", { n: live.n })}</div>${topListLive("mem_avg", "var(--mem)")}</div>
+  <div><div class="stat">${ico("cpu")} ${L("cpu")}</div><div class="big">${pctS(live.cpu)}</div><div class="muted">${L("acrossN", { n: live.n })}</div>${topListLive("cpu", "var(--cpu)")}</div>
+  <div><div class="stat">${ico("memory")} ${L("memory")}</div><div class="big">${fmtBytes(live.mem)}</div><div class="muted">${L("acrossN", { n: live.n })}</div>${topListLive("mem", "var(--mem)")}</div>
 </div>`,
   );
 }
@@ -795,54 +866,61 @@ ${eventBlocks}`,
 
 export function metricsPage(c: PageCtx): string {
   const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
-  const sort = c.query.get("sort") === "memory" ? "mem_avg" : "cpu_avg";
+  const sortMem = c.query.get("sort") === "memory";
   const hours = Math.min(720, Math.max(1, Number(c.query.get("h") ?? 24)));
   const from = c.now - hours * H;
   const hn = hostNames(c.db);
   const filter = (c.query.get("q") ?? "").trim().toLowerCase();
   const onlyRunning = c.query.get("state") !== "all";
   const hostF = c.query.get("host") ?? "";
-  const join = onlyRunning ? "JOIN containers c ON c.instance_id=m.instance_id AND c.id=m.container_id AND c.state='running'" : "";
-  const allN = (c.db.prepare(`SELECT count(*) n FROM (SELECT 1 FROM metrics m ${join} WHERE m.ts>=? GROUP BY m.instance_id, m.host, m.container_name)`).get(from) as { n: number }).n;
-  const rows = (
-    c.db
-      .prepare(
-        `SELECT m.instance_id, m.host, m.container_name name, avg(m.cpu_avg) cpu, max(m.cpu_max) cpu_pk, avg(m.mem_avg) mem, avg(m.mem_pct_avg) pct
-         FROM metrics m ${join} WHERE m.ts>=? ${hostF ? "AND m.host=?" : ""}
-         GROUP BY m.instance_id, m.host, m.container_name ORDER BY m.host, ${sort === "mem_avg" ? "mem" : "cpu"} DESC`,
-      )
-      .all(...(hostF ? [from, hostF] : [from])) as { instance_id: string; host: string; name: string; cpu: number; cpu_pk: number; mem: number; pct: number }[]
-  ).filter((r) => !filter || r.name.toLowerCase().includes(filter));
-  const series = seriesAll(c.db, from, c.now);
+  const current = liveRows(c.db, c.now, true);
+  const listed = (onlyRunning ? current : liveRows(c.db, c.now, false)).filter((r) => (!hostF || r.host === hostF) && (!filter || r.name.toLowerCase().includes(filter)));
+  const peaks = new Map<string, { cpu: number; mem: number }>();
+  for (const p of c.db.prepare("SELECT instance_id, host, container_name, max(cpu_max) cpu, max(mem_max) mem FROM metric_roll WHERE ts>=? GROUP BY instance_id, host, container_name").all(from) as { instance_id: string; host: string; container_name: string; cpu: number | null; mem: number | null }[]) {
+    peaks.set(`${p.instance_id}|${p.host}|${p.container_name}`, { cpu: p.cpu ?? 0, mem: p.mem ?? 0 });
+  }
+  listed.sort((a, b) => (sortMem ? b.mem - a.mem : b.cpu - a.cpu));
+  const series = seriesAll(c.db, from);
   const sp = (r: { instance_id: string; host: string; name: string }) => series.get(`${r.instance_id}|${r.host}|${r.name}`) ?? { cpu: [], mem: [] };
-  const byHost = new Map<string, typeof rows>();
-  for (const r of rows) byHost.set(r.host, [...(byHost.get(r.host) ?? []), r]);
+  const byHost = new Map<string, LiveRow[]>();
+  for (const r of listed) byHost.set(r.host, [...(byHost.get(r.host) ?? []), r]);
   const b = c.config.basePath;
   const live = nowStats(c.db, c.now);
   const hostRam = hostMemTotal(c.db);
+  let util = 0;
+  const seenHost = new Set<string>();
+  for (const r of current) {
+    if (seenHost.has(r.host)) continue;
+    seenHost.add(r.host);
+    const cpuSum = current.filter((x) => x.host === r.host).reduce((s, x) => s + x.cpu, 0);
+    util += hostUtil(c.db, r.instance_id, r.host, cpuSum);
+  }
   const cards = [...byHost.entries()]
     .map(([h, rs]) => {
       const cpu = rs.reduce((s, r) => s + r.cpu, 0);
       const mem = rs.reduce((s, r) => s + r.mem, 0);
+      const hi = hostInfo(c.db, rs[0]?.instance_id ?? "", h);
+      const utilHere = hostUtil(c.db, rs[0]?.instance_id ?? "", h, cpu);
       const hostCpu = rs.reduce<number[]>((acc, r) => {
         const s = sp(r).cpu;
-        return s.map((v, i) => (acc[i] ?? 0) + v);
+        const scale = hi.ncpu > 0 ? hi.ncpu : 1;
+        return s.map((v, i) => (acc[i] ?? 0) + v / scale);
       }, []);
       const hostMem = rs.reduce<number[]>((acc, r) => {
         const s = sp(r).mem;
         return s.map((v, i) => (acc[i] ?? 0) + v);
       }, []);
-      const hi = hostInfo(c.db, rs[0]?.instance_id ?? "", h);
       return `<div class="hostbar">${ico("server")} ${esc(hi.name || hn.get(h) || h)} <span class="muted">${rs.length} ${L("containers")}
-        <span>${ico("cpu")} ${pctS(cpu)}</span> ${spark(hostCpu, "var(--cpu)", 72, 18)}
+        <span>${ico("cpu")} ${pctS(utilHere)}</span> ${spark(hostCpu, "var(--cpu)", 72, 18)}
         <span>${ico("memory")} ${fmtBytes(mem)}${hi.mem ? " / " + fmtBytes(hi.mem) : ""}</span> ${spark(hostMem, "var(--mem)", 72, 18)}</span></div>
         <div class="grid3">${rs
-          .map(
-            (r) =>
-              `<a class="card mc" href="${b}/metrics/${encodeURIComponent(r.instance_id)}/${encodeURIComponent(r.host)}/${encodeURIComponent(r.name)}?h=${hours}"><h3>${esc(r.name)} ${ico("expand")}</h3>
-               <div class="kv"><div><div class="l">${ico("cpu")} ${L("cpu")}</div><b>${pctS(r.cpu)}</b> <span class="l">${L("peak")} ${pctS(r.cpu_pk)}</span></div>${spark(sp(r).cpu, "var(--cpu)", 140, 36)}</div>
-               <div class="kv"><div><div class="l">${ico("memory")} ${L("memory")}</div><b>${fmtBytes(r.mem)}</b> <span class="l">${pctS(r.pct)} ${L("ofLimit")}</span></div>${spark(sp(r).mem, "var(--mem)", 140, 36)}</div></a>`,
-          )
+          .map((r) => {
+            const pk = peaks.get(`${r.instance_id}|${r.host}|${r.name}`);
+            const cpuPk = Math.max(r.cpu_pk, pk?.cpu ?? 0);
+            return `<a class="card mc" href="${b}/metrics/${encodeURIComponent(r.instance_id)}/${encodeURIComponent(r.host)}/${encodeURIComponent(r.name)}?h=${hours}"><h3>${esc(r.name)} ${ico("expand")}</h3>
+               <div class="kv"><div><div class="l">${ico("cpu")} ${L("cpu")}</div><b>${pctS(r.cpu)}</b> <span class="l">${L("peak")} ${pctS(cpuPk)}</span></div>${spark(sp(r).cpu, "var(--cpu)", 140, 36)}</div>
+               <div class="kv"><div><div class="l">${ico("memory")} ${L("memory")}</div><b>${fmtBytes(r.mem)}</b> <span class="l">${pctS(r.pct)} ${L("ofLimit")}</span></div>${spark(sp(r).mem, "var(--mem)", 140, 36)}</div></a>`;
+          })
           .join("")}</div>`;
     })
     .join("");
@@ -860,15 +938,16 @@ export function metricsPage(c: PageCtx): string {
 <input name="q" placeholder="${L("filterContainers")}" value="${esc(c.query.get("q") ?? "")}">
 <select name="h" onchange="this.form.submit()"><option value="1" ${hours === 1 ? "selected" : ""}>1h</option><option value="6" ${hours === 6 ? "selected" : ""}>6h</option><option value="24" ${hours === 24 ? "selected" : ""}>24h</option><option value="168" ${hours === 168 ? "selected" : ""}>7d</option></select>
 <select name="state" onchange="this.form.submit()"><option value="running" ${onlyRunning ? "selected" : ""}>${L("running")}</option><option value="all" ${onlyRunning ? "" : "selected"}>${L("all")}</option></select>
-<select name="sort" onchange="this.form.submit()"><option value="cpu" ${sort === "cpu_avg" ? "selected" : ""}>${t(c.lang, "sortBy")} CPU</option><option value="memory" ${sort !== "cpu_avg" ? "selected" : ""}>${t(c.lang, "sortBy")} ${t(c.lang, "memory")}</option></select>
+<select name="sort" onchange="this.form.submit()"><option value="cpu" ${sortMem ? "" : "selected"}>${t(c.lang, "sortBy")} CPU</option><option value="memory" ${sortMem ? "selected" : ""}>${t(c.lang, "sortBy")} ${t(c.lang, "memory")}</option></select>
 </form>
 <div class="sum">
-  <div class="card"><div class="k">${ico("cpu")} ${L("cpuNow")}</div><div class="v">${pctS(live.cpu)}</div></div>
+  <div class="card"><div class="k">${ico("cpu")} ${L("cpuNow")}</div><div class="v">${pctS(util)}</div></div>
   <div class="card"><div class="k">${ico("memory")} ${L("memory")}</div><div class="v">${hostRam ? L("ofTotal", { used: fmtBytes(live.mem), total: fmtBytes(hostRam) }) : fmtBytes(live.mem)}</div></div>
   <div class="card"><div class="k">${ico("boxes")} ${L("containers")}</div><div class="v">${live.n}</div></div>
-  <div class="card"><div class="k">${ico("server")} ${L("hosts")}</div><div class="v">${byHost.size}</div></div>
+  <div class="card"><div class="k">${ico("server")} ${L("hosts")}</div><div class="v">${seenHost.size}</div></div>
 </div>
-<p class="muted">${L("ofN", { shown: rows.length, total: Math.max(allN, rows.length) })} · <a class="link" href="${qs("state", onlyRunning ? "all" : "running")}">${onlyRunning ? L("all") : L("running")}</a></p>
+<p class="muted">${L("cpuNowHint")}</p>
+<p class="muted">${L("ofN", { shown: listed.length, total: Math.max(current.length, listed.length) })} · <a class="link" href="${qs("state", onlyRunning ? "all" : "running")}">${onlyRunning ? L("all") : L("running")}</a></p>
 ${cards}`,
   );
 }
@@ -879,9 +958,10 @@ export function metricDetail(c: PageCtx, instance: string, host: string, name: s
   const from = c.now - hours * H;
   const pts = Math.min(120, hours * 4);
   const s = seriesDetail(c.db, instance, host, name, from, pts);
-  const last = s.at(-1);
-  const cpuPk = Math.max(0, ...s.map((x) => x.cpuPk));
-  const memPk = Math.max(0, ...s.map((x) => x.memPk));
+  const liveNow = c.db.prepare("SELECT coalesce(sum(cpu),0) cpu, coalesce(sum(mem),0) mem, max(mem_pct) pct, count(*) n FROM live_metrics WHERE instance_id=? AND host=? AND container_name=? AND ts>=?").get(instance, host, name, c.now - FRESH_MS) as { cpu: number; mem: number; pct: number | null; n: number };
+  const last = liveNow.n ? { cpu: liveNow.cpu, mem: liveNow.mem, pct: liveNow.pct ?? 0 } : s.at(-1);
+  const cpuPk = Math.max(0, ...s.map((x) => x.cpuPk), liveNow.cpu);
+  const memPk = Math.max(0, ...s.map((x) => x.memPk), liveNow.mem);
   const ev = c.db.prepare("SELECT ts,name,level,detail FROM events WHERE instance_id=? AND host=? AND container_name=? AND ts>=? AND name NOT IN ('start') ORDER BY ts DESC LIMIT 50").all(instance, host, name, from) as Record<string, string & number>[];
   const b = c.config.basePath;
   const tz = c.config.timezone;
@@ -968,24 +1048,25 @@ export function instancesPage(c: PageCtx, versions: Map<string, string>): string
   const items = c.config.instances
     .map((i) => {
       const hosts = c.db.prepare("SELECT id, name FROM hosts WHERE instance_id=?").all(i.id) as { id: string; name: string }[];
-      const conts = (c.db.prepare("SELECT count(*) n FROM containers WHERE instance_id=? AND state='running'").get(i.id) as { n: number }).n;
-      const v = versions.get(i.id);
       const hostRows = hosts
         .map((h) => {
-          const n = (c.db.prepare("SELECT count(*) n FROM containers WHERE instance_id=? AND host=? AND state='running'").get(i.id, h.id) as { n: number }).n;
+          const n = aliveCount(c.db, i.id, h.id, c.now);
           const hi = hostInfo(c.db, i.id, h.id);
-          const role = hi.type === "agent" || hi.type === "server" ? hi.type : hi.type || "agent";
+          const role = hostRole(hi.type);
+          const ver = role === "agent" ? verLabel(hi.agentVersion) : verLabel(versions.get(i.id));
           return `<div class="hostrow">${ico("server")} <span class="nm">${esc(hi.name || h.name || h.id)}</span>
             <span class="tag">${esc(role === "server" ? t(c.lang, "serverRole") : t(c.lang, "agent"))}</span>
-            <span class="muted">${n} ${L("containers")} · v${esc(v ?? "?")}</span></div>`;
+            <span class="muted">${n} ${L("containers")} · ${esc(ver)}</span></div>`;
         })
         .join("");
+      const conts = hosts.reduce((s, h) => s + aliveCount(c.db, i.id, h.id, c.now), 0);
+      const online = versions.has(i.id);
       return `<div class="card">
-        <div class="kv"><span>${ico("server")} <b>${esc(i.name)}</b> <span class="chip ${v ? "ok" : "err"}">${v ? L("online") : L("offline")}</span></span>
+        <div class="kv"><span>${ico("server")} <b>${esc(i.name)}</b> <span class="chip ${online ? "ok" : "err"}">${online ? L("online") : L("offline")}</span></span>
           <span><a class="link" href="${b}/metrics">${ico("chart")} ${L("metrics")}</a> · <a class="link" href="${esc(i.url)}" rel="noreferrer">${L("open")} ${ico("external")}</a></span></div>
         <div class="muted">${hosts.length} ${L("hosts")} · ${conts} ${L("containers")}</div>
         ${hostRows}
-        <div class="muted" style="margin-top:10px">${ico("clock")} ${L("connectedNow")} · ${L("dailyReport")}</div></div>`;
+        <div class="muted" style="margin-top:10px">${ico("clock")} ${L("dailyReportLine")}</div></div>`;
     })
     .join("");
   return layout(
@@ -1001,31 +1082,65 @@ export function askPage(c: PageCtx, extra: { ask?: string; notice?: string } = {
   return layout(c, "", t(c.lang, "askAbout"), `<h1>${ico("sparkles")} ${L("askAbout")}</h1>${askBox(c, `${c.config.basePath}/ask`, extra.ask, extra.notice)}`);
 }
 
-export function integrationsPage(c: PageCtx): string {
-  const L = (k: Key) => esc(t(c.lang, k));
-  let notify = t(c.lang, "none");
-  try {
-    if (process.env["NOTIFY_EMAIL"]) notify = process.env["NOTIFY_EMAIL"];
-    else if (process.env["NOTIFY_URL"]) notify = new URL(process.env["NOTIFY_URL"]).host;
-  } catch {
-    /* ignore */
-  }
+export interface IntegrationsView {
+  freshToken?: string;
+  tokenError?: string;
+  tokens?: { id: number; name: string; prefix: string; created: number; last_used: number | null; calls: number; revoked: number }[];
+  calls?: { ts: number; token_name: string; tool: string; ms: number }[];
+  muteUntil?: number;
+  toolCount?: number;
+}
+
+export function integrationsPage(c: PageCtx, extra: IntegrationsView = {}): string {
+  const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
   const b = c.config.basePath;
   const tab = c.query.get("tab") ?? "notifications";
+  const when = (ms: number) => new Date(ms).toLocaleString(c.lang === "fr" ? "fr-BE" : "en-US", { timeZone: c.config.timezone, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const mailOn = Boolean(c.config.smtp && c.config.notifyEmail);
+  const mailLabel = mailOn ? c.config.notifyEmail! : t(c.lang, "emailMissing");
+  const muted = (extra.muteUntil ?? 0) > c.now;
+  const muteBox = `<div class="mutebox"><h2>${ico("bell")} ${L("muteNotif")}</h2>
+<p class="muted">${L("muteHint")}</p>
+${muted
+  ? `<p>${L("mutedUntil", { when: when(extra.muteUntil!) })}</p><form method="post" action="${b}/integrations"><input type="hidden" name="action" value="unmute"><button>${L("unmute")}</button></form>`
+  : `<form method="post" action="${b}/integrations"><input type="hidden" name="action" value="mute_for"><div class="pills">
+<button name="for" value="1h">${L("mute1h")}</button><button name="for" value="8h">${L("mute8h")}</button><button name="for" value="tomorrow">${L("muteTomorrow")}</button><button name="for" value="week">${L("muteWeek")}</button>
+</div></form>`}</div>`;
+  const channel = c.config.notifyChannel || "general";
+  const chatCard = (name: string) => `<div class="card"><div class="kv"><span>${ico("message")} <b>${esc(name)}</b><div class="muted">${L("chatConnected")}</div></span><span class="chip ok">ON</span></div></div>`;
+  const url = c.config.mcpAdvertiseUrl;
+  const tokens = (extra.tokens ?? []).filter((tk) => !tk.revoked);
+  const mcpBody = `<h2>${L("mcpServer")}</h2>
+<div class="card"><pre>${url ? esc(url) : L("mcpMissing")}</pre>
+${c.config.litellmMcpUrl ? `<p class="muted">LiteLLM · ${esc(c.config.litellmMcpUrl)}</p>` : ""}
+<p class="muted">${L("litellmNote")}</p></div>
+<h2>${L("createToken")}</h2>
+<form method="post" action="${b}/integrations?tab=mcp" class="filters"><input name="name" placeholder="${L("tokenName")}" maxlength="40" required><input type="hidden" name="action" value="create_token"><button>${L("createToken")}</button></form>
+${extra.tokenError ? `<p class="notice">${esc(extra.tokenError)}</p>` : ""}
+${extra.freshToken ? `<div class="notice secret">${esc(extra.freshToken)}<div class="muted">${L("tokenOnce")}</div></div>` : ""}
+<h2>${L("connectedApps")} ${tokens.length}</h2>
+<table class="logtbl"><tr><th>${L("tokenName")}</th><th>${L("lastUsed")}</th><th>${L("created")}</th><th></th></tr>
+${tokens.map((tk) => `<tr><td>${esc(tk.name)} <span class="muted">${esc(tk.prefix)}…</span><div class="muted">${tk.calls}</div></td><td>${tk.last_used ? esc(when(tk.last_used)) : "—"}</td><td>${esc(when(tk.created))}</td><td><form method="post" action="${b}/integrations?tab=mcp"><input type="hidden" name="action" value="revoke_token"><input type="hidden" name="id" value="${tk.id}"><button>${L("revoke")}</button></form></td></tr>`).join("") || `<tr><td colspan="4" class="muted">—</td></tr>`}
+</table>
+<h2>${L("callsRecent")}</h2>
+<table class="logtbl"><tr><th>${L("when")}</th><th>${L("tokenName")}</th><th>tool</th><th>ms</th></tr>
+${(extra.calls ?? []).map((call) => `<tr><td>${esc(when(call.ts))}</td><td>${esc(call.token_name)}</td><td class="mono">${esc(call.tool)}</td><td>${call.ms}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">${L("noCalls")}</td></tr>`}
+</table>
+<h2>${L("setupTitle")}</h2>
+<ol><li>${L("setup1")}</li><li>${L("setup2")}</li><li>${L("setup3")}</li></ol>
+<p class="muted">${L("availableTools", { n: extra.toolCount ?? 0 })}</p>`;
   const body =
     tab === "mcp"
-      ? `<div class="card"><b>${L("mcpEndpoint")}</b><pre>${esc(c.config.publicUrl)}/mcp  (Authorization: Bearer &lt;MCP_TOKEN&gt;)</pre>
-<pre class="muted">{ "mcpServers": { "dozzle": { "type": "http", "url": "${esc(c.config.publicUrl)}/mcp", "headers": { "Authorization": "Bearer …" } } } }</pre></div>`
+      ? mcpBody
       : tab === "chat"
-        ? `<div class="card">${ico("message")} ${L("noChat")}<p class="muted">${L("chatIntro")}</p></div>`
-        : `<h2>${ico("bell")} ${L("muteNotif")}</h2>
-<p class="muted">${L("muteHint")}</p>
-<div class="pills"><span>${L("mute1h")}</span><span>${L("mute8h")}</span><span>${L("muteTomorrow")}</span><span>${L("muteWeek")}</span></div>
+        ? c.config.hubConfigured
+          ? `${chatCard("Discord")}${chatCard("Telegram")}${chatCard("Zulip")}<p class="muted">${L("chatVia", { channel })}</p>`
+          : `<div class="card">${ico("message")} ${L("noChat")}<p class="muted">${L("chatIntro")}</p></div>`
+        : `${muteBox}
 <h2>${ico("mail")} ${L("notifChannels")}</h2>
-<div class="card"><div class="kv"><span>${ico("mail")} <b>${esc(notify)}</b><div class="muted">${L("emailNotif")}</div></span>
-<span><span class="chip">${L("primary")}</span> <span class="chip ok">ON</span></span></div>
-<div class="muted" style="margin-top:8px">${L("batchHourly")}</div></div>
-<div class="card muted" style="text-align:center">${ico("plus")} ${L("addChannel")}</div>`;
+<div class="card"><div class="kv"><span>${ico("mail")} <b>${esc(mailLabel)}</b><div class="muted">${L("emailNotif")}</div></span>
+<span><span class="chip">${L("primary")}</span> ${mailOn ? `<span class="chip ok">ON</span>` : ""}</span></div>
+<div class="muted" style="margin-top:8px">${L("dailyReportLine")}</div></div>`;
   return layout(
     c,
     "/integrations",

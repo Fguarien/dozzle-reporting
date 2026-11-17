@@ -132,6 +132,61 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+
+-- Latest sample per container. Pages read this instead of scanning 30 s history.
+CREATE TABLE IF NOT EXISTS live_metrics (
+  instance_id TEXT NOT NULL,
+  container_id TEXT NOT NULL,
+  container_name TEXT NOT NULL,
+  host TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  cpu REAL NOT NULL,
+  cpu_max REAL NOT NULL,
+  mem REAL NOT NULL,
+  mem_pct REAL NOT NULL,
+  net_rx REAL NOT NULL,
+  net_tx REAL NOT NULL,
+  disk_r REAL NOT NULL,
+  disk_w REAL NOT NULL,
+  PRIMARY KEY (instance_id, container_id)
+);
+
+-- One row per container per hour, so a 24 h sparkline is thousands of rows, not hundreds of thousands.
+CREATE TABLE IF NOT EXISTS metric_roll (
+  ts INTEGER NOT NULL,
+  instance_id TEXT NOT NULL,
+  container_id TEXT NOT NULL,
+  container_name TEXT NOT NULL,
+  host TEXT NOT NULL,
+  cpu_avg REAL, cpu_max REAL,
+  mem_avg REAL, mem_max REAL,
+  mem_pct_avg REAL,
+  net_rx REAL, net_tx REAL,
+  disk_r REAL, disk_w REAL,
+  samples INTEGER NOT NULL,
+  PRIMARY KEY (ts, instance_id, container_id)
+);
+CREATE INDEX IF NOT EXISTS metric_roll_ts ON metric_roll(ts);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  hash TEXT NOT NULL UNIQUE,
+  created INTEGER NOT NULL,
+  last_used INTEGER,
+  calls INTEGER NOT NULL DEFAULT 0,
+  revoked INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS mcp_calls (
+  id INTEGER PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  token_name TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mcp_calls_ts ON mcp_calls(ts);
 `;
 
 export function openDb(path: string): Db {
@@ -158,4 +213,39 @@ export function prune(db: Db, retentionDays: number, now = Date.now()): void {
   db.prepare("DELETE FROM changes WHERE ts < ?").run(cut);
   db.prepare("DELETE FROM alerts WHERE last_ts < ?").run(cut);
   db.prepare("DELETE FROM findings WHERE status='resolved' AND resolved_at < ?").run(cut);
+  db.prepare("DELETE FROM metric_roll WHERE ts < ?").run(cut);
+  db.prepare("DELETE FROM mcp_calls WHERE ts < ?").run(now - 7 * 86_400_000);
+}
+
+/**
+ * Fill the fast tables from raw history once. Empty on a fresh DB.
+ * The hourly rollup is the slow query (it reads every 30 s bucket); callers run it before serving.
+ */
+export function seedSnapshots(db: Db): { live: number; roll: number } {
+  let live = 0;
+  let roll = 0;
+  const haveLive = (db.prepare("SELECT count(*) n FROM live_metrics").get() as { n: number }).n;
+  if (haveLive === 0) {
+    const r = db.prepare(
+      `INSERT INTO live_metrics(instance_id,container_id,container_name,host,ts,cpu,cpu_max,mem,mem_pct,net_rx,net_tx,disk_r,disk_w)
+       SELECT instance_id, container_id, container_name, coalesce(host,''), ts,
+              coalesce(cpu_avg,0), coalesce(cpu_max,0), coalesce(mem_avg,0), coalesce(mem_pct_avg,0),
+              coalesce(net_rx_bps,0), coalesce(net_tx_bps,0), coalesce(disk_r_bps,0), coalesce(disk_w_bps,0)
+       FROM metrics WHERE ts = (SELECT max(ts) FROM metrics)`,
+    ).run();
+    live = Number(r.changes);
+  }
+  const haveRoll = (db.prepare("SELECT count(*) n FROM metric_roll").get() as { n: number }).n;
+  if (haveRoll === 0) {
+    const r = db.prepare(
+      `INSERT INTO metric_roll(ts,instance_id,container_id,container_name,host,cpu_avg,cpu_max,mem_avg,mem_max,mem_pct_avg,net_rx,net_tx,disk_r,disk_w,samples)
+       SELECT (ts / 3600000) * 3600000, instance_id, container_id, max(container_name), max(coalesce(host,'')),
+              avg(cpu_avg), max(cpu_max), avg(mem_avg), max(mem_max), avg(mem_pct_avg),
+              avg(net_rx_bps), avg(net_tx_bps), avg(disk_r_bps), avg(disk_w_bps), sum(samples)
+       FROM metrics
+       GROUP BY (ts / 3600000) * 3600000, instance_id, container_id`,
+    ).run();
+    roll = Number(r.changes);
+  }
+  return { live, roll };
 }

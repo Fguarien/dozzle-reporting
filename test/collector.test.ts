@@ -44,6 +44,35 @@ describe("Collector", () => {
     expect(m.net_rx_bps).toBeCloseTo(1000);
   });
 
+  it("retires ids missing from a host snapshot and leaves the other host", () => {
+    const s = setup();
+    s.col.handle("containers-changed", JSON.stringify([c("a", "web", "h1"), c("b", "db", "h2")]));
+    s.col.handle("containers-changed", JSON.stringify([c("a2", "web", "h1", { image: "img:2" })]));
+    const rows = s.db.prepare("SELECT id, state FROM containers ORDER BY id").all();
+    expect(rows).toEqual([
+      { id: "a", state: "exited" },
+      { id: "a2", state: "running" },
+      { id: "b", state: "running" },
+    ]);
+  });
+
+  it("does not retire the fleet on an empty snapshot", () => {
+    const s = setup();
+    s.col.handle("containers-changed", JSON.stringify([c("a", "web", "h1")]));
+    s.col.handle("containers-changed", "[]");
+    expect((s.db.prepare("SELECT state FROM containers").get() as { state: string }).state).toBe("running");
+  });
+
+  it("keeps a live row and an hourly rollup beside the raw bucket", () => {
+    const s = setup();
+    s.col.handle("containers-changed", JSON.stringify([c("a", "web", "h1")]));
+    s.col.handle("container-stat", JSON.stringify({ id: "a", cpu: 40, memory: 10, memoryUsage: 1000 }));
+    s.col.flush();
+    const live = s.db.prepare("SELECT cpu, container_name FROM live_metrics").get() as { cpu: number; container_name: string };
+    expect(live).toEqual({ cpu: 40, container_name: "web" });
+    expect((s.db.prepare("SELECT count(*) n FROM metric_roll").get() as { n: number }).n).toBe(1);
+  });
+
   it("levels a non-zero exit as error and folds exit into changes", () => {
     const s = setup();
     s.col.handle("containers-changed", JSON.stringify([c("a", "web", "h1")]));
