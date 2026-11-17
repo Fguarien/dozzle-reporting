@@ -18,6 +18,13 @@ export const DICT = {
     integrationsIntro: "Where alerts get delivered and how AI clients connect.", mcpEndpoint: "MCP endpoint", notifyChannel: "Notification channel", none: "none",
     theme: "Theme", auto: "Auto", light: "Light", dark: "Dark", signOut: "Sign out", status: "Status", source: "Rule", level: "Level", when: "When",
     absorbed: "follow-up batches absorbed", eventsN: "{n} event(s)", daysOpen: "open {n} day(s)", why: "Why it matters", fix: "Suggested fix",
+    searchAsk: "Search logs or ask…", showAll: "Show all {n}", stillHappening: "Still happening · day {n}",
+    cpuNow: "CPU now", ofTotal: "{used} of {total}", newError: "new error", firstSeen: "First seen {when}",
+    selfHosted: "SELF-HOSTED", brand: "Dozzle Cloud", notifications: "Notifications", chat: "Chat",
+    muteNotif: "Mute notifications", notifChannels: "Notification channels", emailNotif: "Email notifications",
+    dailyReport: "Daily report", connectedNow: "Connected now", filterContainers: "Filter containers",
+    logsql: "LogsQL", volume: "Volume", method: "Method", message: "Message · path", duration: "Duration",
+    changeTime: "Change time",
   },
   fr: {
     overview: "Vue d'ensemble", findings: "Constats", updates: "Mises à jour", alerts: "Alertes", logs: "Logs", metrics: "Métriques",
@@ -37,6 +44,13 @@ export const DICT = {
     integrationsIntro: "Où partent les alertes et comment les clients IA se branchent.", mcpEndpoint: "Point d'accès MCP", notifyChannel: "Canal de notification", none: "aucun",
     theme: "Thème", auto: "Auto", light: "Clair", dark: "Sombre", signOut: "Se déconnecter", status: "Statut", source: "Règle", level: "Niveau", when: "Quand",
     absorbed: "lots suivants absorbés", eventsN: "{n} événement(s)", daysOpen: "ouvert depuis {n} jour(s)", why: "Pourquoi c'est important", fix: "Correctif proposé",
+    searchAsk: "Chercher dans les logs…", showAll: "Tout afficher ({n})", stillHappening: "Toujours en cours · jour {n}",
+    cpuNow: "CPU maintenant", ofTotal: "{used} sur {total}", newError: "nouvelle erreur", firstSeen: "Vu d'abord le {when}",
+    selfHosted: "SELF-HOSTED", brand: "Dozzle Cloud", notifications: "Notifications", chat: "Chat",
+    muteNotif: "Mettre les notifications en sourdine", notifChannels: "Canaux de notification", emailNotif: "Notifications par e-mail",
+    dailyReport: "Rapport quotidien", connectedNow: "Connecté", filterContainers: "Filtrer les conteneurs",
+    logsql: "LogsQL", volume: "Volume", method: "Méthode", message: "Message · chemin", duration: "Durée",
+    changeTime: "Changer l'heure",
   },
 } as const;
 
