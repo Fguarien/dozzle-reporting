@@ -209,8 +209,34 @@ async function main(): Promise<void> {
         };
         let html: string | undefined;
         const m = sub.match(/^\/metrics\/([^/]+)\/([^/]+)\/([^/]+)$/);
+        const fid = sub.match(/^\/findings\/(\d+)$/);
         if (sub === "") html = ui.overview(pc);
         else if (sub === "/findings") html = ui.findings(pc);
+        else if (fid) {
+          const id = Number(fid[1]);
+          const row = db.prepare("SELECT containers FROM findings WHERE id=?").get(id) as { containers: string } | undefined;
+          let logs = "";
+          if (row) {
+            let names: string[] = [];
+            try {
+              names = JSON.parse(row.containers) as string[];
+            } catch {
+              names = [];
+            }
+            const chunks: string[] = [];
+            for (const name of names.slice(0, 4)) {
+              try {
+                chunks.push(
+                  await callTool(ctx, "search_logs", { container_name: name, after: "24h", limit: 40, level: ["error", "warn", "fatal"] }),
+                );
+              } catch {
+                /* live logs optional */
+              }
+            }
+            logs = chunks.join("\n");
+          }
+          html = ui.findingDetail(pc, id, logs);
+        }
         else if (sub === "/updates") html = ui.updates(pc);
         else if (sub === "/alerts") html = ui.alertsPage(pc, "alerts");
         else if (sub === "/alerts/events") html = ui.alertsPage(pc, "events");
@@ -220,12 +246,15 @@ async function main(): Promise<void> {
         else if (sub === "/logs") {
           let result: string | undefined;
           const q = url.searchParams;
-          if (q.get("q") || q.get("container")) {
+          const parsed = ui.parseLogsql(q.get("q") ?? "");
+          const container = q.get("container") || parsed.container;
+          if (parsed.query || container || parsed.levels) {
             const r = await callTool(ctx, "search_logs", {
-              query: q.get("q") || undefined,
-              container_name: q.get("container") || undefined,
-              after: q.get("after") || "1h",
-              limit: 300,
+              query: parsed.query,
+              container_name: container,
+              level: parsed.levels,
+              after: q.get("after") || "15m",
+              limit: 200,
             });
             result = r;
           }
