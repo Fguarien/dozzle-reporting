@@ -43,6 +43,17 @@ export async function summarizeAlert(llm: Llm, a: AlertRow): Promise<{ title: st
   return { title: j.title ?? a.title ?? "", summary: j.summary ?? "" };
 }
 
+/** One-shot operator question about an alert, finding or container (the Cloud « Ask about this »). */
+export async function askAbout(llm: Llm, topic: string, evidence: string, question: string): Promise<string> {
+  return chat(
+    { ...llm, model: llm.summaryModel },
+    `You are the operator's assistant for a self-hosted Dozzle. Answer in ${LANG_NAME[llm.language] ?? llm.language}. ` +
+      `Be concrete: quote the evidence, say what to check, what to change. No filler. If the evidence is thin, say so.`,
+    `Topic:\n${topic}\n\nEvidence:\n${evidence.slice(0, 12_000)}\n\nQuestion: ${question.trim() || "What happened, why, and what should I do?"}`,
+    false,
+  );
+}
+
 interface RawFinding {
   key: string;
   severity: "low" | "medium" | "high" | "critical";

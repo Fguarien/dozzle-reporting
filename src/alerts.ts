@@ -26,7 +26,7 @@ export interface AlertRow {
   fingerprint: string;
   title: string | null;
   summary: string | null;
-  status: "sent" | "suppressed" | "muted";
+  status: "sent" | "suppressed" | "muted" | "resolved";
   suppressed_reason: string | null;
   parent_id: number | null;
   absorbed: number;
@@ -113,7 +113,7 @@ export class Alerts {
     const fp = `${instanceId}|${n.subscription.id}|${n.container.hostId ?? ""}|${n.container.name}|${d.kind}|${d.pattern}`;
 
     // 1. Same problem within the batch window → same alert.
-    const open = this.db.prepare("SELECT * FROM alerts WHERE fingerprint=? AND last_ts >= ? ORDER BY id DESC LIMIT 1").get(fp, t - this.o.batchMs) as AlertRow | undefined;
+    const open = this.db.prepare("SELECT * FROM alerts WHERE fingerprint=? AND last_ts >= ? AND status NOT IN ('resolved') ORDER BY id DESC LIMIT 1").get(fp, t - this.o.batchMs) as AlertRow | undefined;
     if (open) {
       this.db.prepare("UPDATE alerts SET last_ts=?, event_count=event_count+1 WHERE id=?").run(t, open.id);
       return this.get(open.id)!;
@@ -174,7 +174,16 @@ export class Alerts {
     this.db
       .prepare("INSERT INTO mute_rules(created,alert_id,container_name,kind,patterns,active) VALUES(?,?,?,?,?,1) ON CONFLICT(alert_id) DO UPDATE SET active=1")
       .run(this.o.now(), alertId, a.container_name, a.kind, patterns);
+    this.db.prepare("UPDATE alerts SET status='muted' WHERE id=? AND status!='resolved'").run(alertId);
     return { kind: a.kind, container_name: a.container_name, patterns };
+  }
+
+  /** Operator marked the incident fixed: it leaves Overview and will not absorb new batches. */
+  resolve(alertId: number): boolean {
+    const a = this.get(alertId);
+    if (!a) return false;
+    this.db.prepare("UPDATE alerts SET status='resolved' WHERE id=?").run(alertId);
+    return true;
   }
 
   private isMuted(container: string, kind: string, pattern: string): boolean {

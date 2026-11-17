@@ -147,7 +147,13 @@ details.evt summary{cursor:pointer;list-style:none;display:flex;gap:10px;align-i
 details.evt summary::-webkit-details-marker{display:none}
 details.evt .kvb{font:12.5px/1.5 ui-monospace,Menlo,monospace;background:var(--soft);border-radius:8px;padding:10px 12px;margin:10px 0 6px;display:flex;flex-wrap:wrap;gap:8px 16px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 16px}
-.actions a,.actions button{border:1px solid var(--line);border-radius:999px;padding:6px 12px;text-decoration:none;font-size:13px;background:var(--bg)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.actions form{display:inline}
+.actions a,.actions button{border:1px solid var(--line);border-radius:999px;padding:6px 12px;text-decoration:none;font-size:13px;background:var(--bg);color:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.actions button.ask{background:#0d9488;border-color:#0d9488;color:#fff}
+.askbox{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:12px 0;background:var(--panel)}
+.askbox textarea{width:100%;min-height:72px;margin:8px 0}
+.notice{border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:8px 0;background:var(--chip)}
 @media (max-width:900px){.shell{grid-template-columns:1fr}aside{position:static;height:auto}.grid2,.sum{grid-template-columns:1fr}main{padding:18px 16px}header.top form.search kbd{display:none}}
 `;
 
@@ -221,6 +227,7 @@ export function layout(c: PageCtx, active: string, title: string, body: string):
 </aside>
 <div><header class="top">
   <form class="search" action="${b}/logs">${ico("search")}<input name="q" placeholder="${L("searchAsk")}" value="${esc(c.query.get("q") ?? "")}" autocomplete="off"><kbd>${ico("kbd")}</kbd></form>
+  <a class="iconbtn" href="${b}/ask" title="${L("askAbout")}">${ico("sparkles")}</a>
   <button class="iconbtn" type="button" onclick="cycleLang()" title="${c.lang === "fr" ? "English" : "Français"}">${c.lang.toUpperCase()}</button>
   <button class="iconbtn" type="button" id="themebtn" onclick="cycleTheme()" title="${L("theme")}">${ico("sun")}</button>
   ${c.user ? `<a class="avatar" href="${b}/auth/logout" title="${esc(c.user)} · ${L("signOut")}">${esc(initials(c.user))}</a>` : ""}
@@ -557,7 +564,7 @@ ${rows.length ? rows.map((f) => findingRow(c, f)).join("") : `<div class="card">
   );
 }
 
-export function findingDetail(c: PageCtx, id: number, logs?: string): string {
+export function findingDetail(c: PageCtx, id: number, logs?: string, extra: { ask?: string; notice?: string } = {}): string {
   const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
   const f = c.db.prepare("SELECT * FROM findings WHERE id=?").get(id) as Record<string, string & number> | undefined;
   if (!f) return layout(c, "/findings", t(c.lang, "findings"), `<p class="muted">#${id}</p>`);
@@ -570,8 +577,11 @@ export function findingDetail(c: PageCtx, id: number, logs?: string): string {
     "/findings",
     String(f.headline),
     `<a class="back" href="${b}/findings">${ico("chevronRight")} ${L("findings")}</a>
-<div class="pagehead"><h1>${ico("bell")} ${esc(f.headline)}</h1><span class="chip ${sev === "high" || sev === "critical" ? "err" : sev === "low" ? "info" : "warn"}">${esc(sev)}</span></div>
+<div class="pagehead"><h1>${ico("bell")} ${esc(f.headline)}</h1>
+<span class="chip ${sev === "high" || sev === "critical" ? "err" : sev === "low" ? "info" : "warn"}">${esc(sev)}</span>
+${actionBar(c, `${b}/findings/${id}`, { fix: f.status !== "resolved", ignore: !f.ignored, ask: true })}</div>
 <p class="muted">${esc(firstSeenLabel(c, Number(f.created)))} · ${esc(names.join(", "))} · ${esc(instanceName(c, String(f.instance_id)))}</p>
+${askBox(c, `${b}/findings/${id}`, extra.ask, extra.notice)}
 ${f.why ? `<p>${esc(f.why)}</p>` : ""}
 ${f.fix ? `<p class="fix">${L("fix")}<br>${esc(f.fix)}</p>` : ""}
 <h2>${L("whatLogsShow")}</h2>
@@ -605,7 +615,7 @@ export function alertsPage(c: PageCtx, tab: "alerts" | "events" | "muted"): stri
   const hn = hostNames(c.db);
   let body = "";
   if (tab === "alerts") {
-    const rows = c.db.prepare("SELECT * FROM alerts WHERE ts>=? ORDER BY ts DESC LIMIT 200").all(c.now - 14 * 24 * H) as Record<string, string & number>[];
+    const rows = c.db.prepare("SELECT * FROM alerts WHERE ts>=? AND status!='resolved' ORDER BY ts DESC LIMIT 200").all(c.now - 14 * 24 * H) as Record<string, string & number>[];
     body = rows.length
       ? rows
           .map((a) => {
@@ -703,7 +713,27 @@ function parseSample(sample: string | null): { name: string; attrs: Record<strin
   return { name: "log", attrs: { message: sample.slice(0, 400) } };
 }
 
-export function alertDetail(c: PageCtx, id: number): string {
+function actionBar(c: PageCtx, actionUrl: string, opts: { fix?: boolean; mute?: boolean; ignore?: boolean; ask?: boolean }): string {
+  const L = (k: Key) => esc(t(c.lang, k));
+  const btn = (action: string, label: Key, icon: IconName, cls = "") =>
+    `<form method="post" action="${actionUrl}"><input type="hidden" name="action" value="${action}"><button class="${cls}" type="submit">${ico(icon)} ${L(label)}</button></form>`;
+  return `<div class="actions">${opts.fix ? btn("fix", "markFixed", "check") : ""}${opts.ask ? btn("ask", "askAbout", "sparkles", "ask") : ""}${opts.mute ? btn("mute", "muteThese", "bellOff") : ""}${opts.ignore ? btn("ignore", "ignore", "filter") : ""}</div>`;
+}
+
+function askBox(c: PageCtx, actionUrl: string, answer?: string, notice?: string): string {
+  const L = (k: Key) => esc(t(c.lang, k));
+  return `${notice ? `<p class="notice">${esc(notice)}</p>` : ""}
+${answer ? `<div class="askbox"><b>${L("askAbout")}</b><p style="white-space:pre-wrap">${esc(answer)}</p></div>` : ""}
+${
+  c.config.llm
+    ? `<form method="post" action="${actionUrl}" class="askbox"><input type="hidden" name="action" value="ask">
+<textarea name="q" placeholder="${L("askPlaceholder")}"></textarea>
+<button class="ask" type="submit">${ico("sparkles")} ${L("askSend")}</button></form>`
+    : `<p class="muted">${L("askNeedLlm")}</p>`
+}`;
+}
+
+export function alertDetail(c: PageCtx, id: number, extra: { ask?: string; notice?: string } = {}): string {
   const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
   const a = c.db.prepare("SELECT * FROM alerts WHERE id=?").get(id) as Record<string, string & number> | undefined;
   const b = c.config.basePath;
@@ -754,8 +784,9 @@ export function alertDetail(c: PageCtx, id: number): string {
     "/alerts",
     String(a.title ?? t(c.lang, "alerts")),
     `<a class="back" href="${b}/alerts">${ico("chevronRight")} ${L("backToAlerts")}</a>
-<div class="pagehead"><h1>${esc(a.title)}</h1></div>
-<p class="muted">${esc(a.container_name ?? "")} · ${esc(when)}</p>
+<div class="pagehead"><h1>${esc(a.title)}</h1>${actionBar(c, `${b}/alerts/${id}`, { fix: a.status !== "resolved", mute: true, ask: true })}</div>
+<p class="muted">${esc(a.container_name ?? "")} · ${esc(when)}${a.status === "resolved" ? ` · ${L("markedFixed")}` : a.status === "muted" ? ` · ${L("muted")}` : ""}</p>
+${askBox(c, `${b}/alerts/${id}`, extra.ask, extra.notice)}
 ${a.summary ? `<p>${esc(a.summary)}</p>` : bits.attrs.message && bits.name === "log" ? `<p>${esc(bits.attrs.message)}</p>` : ""}
 <h2>${L("events")} ${Number(a.event_count) || related.length || 1}</h2>
 ${eventBlocks}`,
@@ -842,7 +873,7 @@ ${cards}`,
   );
 }
 
-export function metricDetail(c: PageCtx, instance: string, host: string, name: string): string {
+export function metricDetail(c: PageCtx, instance: string, host: string, name: string, extra: { ask?: string; notice?: string } = {}): string {
   const L = (k: Key) => esc(t(c.lang, k));
   const hours = Math.min(720, Math.max(1, Number(c.query.get("h") ?? 24)));
   const from = c.now - hours * H;
@@ -861,8 +892,10 @@ export function metricDetail(c: PageCtx, instance: string, host: string, name: s
     name,
     `<a class="back" href="${b}/metrics?h=${hours}">${ico("chevronRight")} ${L("backMetrics")}</a>
 <div class="pagehead"><h1>${ico("chart")} ${esc(name)}</h1>
+  ${actionBar(c, `${b}/metrics/${encodeURIComponent(instance)}/${encodeURIComponent(host)}/${encodeURIComponent(name)}?h=${hours}`, { ask: true })}
   <form><select name="h" onchange="this.form.submit()"><option ${hours === 1 ? "selected" : ""} value="1">1h</option><option ${hours === 6 ? "selected" : ""} value="6">6h</option><option ${hours === 24 ? "selected" : ""} value="24">24h</option><option ${hours === 168 ? "selected" : ""} value="168">7d</option></select></form>
 </div>
+${askBox(c, `${b}/metrics/${encodeURIComponent(instance)}/${encodeURIComponent(host)}/${encodeURIComponent(name)}?h=${hours}`, extra.ask, extra.notice)}
 <p class="muted">${esc(hi.name || hostNames(c.db).get(host) || host)}</p>
 <div class="sum">
   <div class="card"><div class="k">${ico("cpu")} ${L("cpuNow")}</div><div class="v">${pctS(last?.cpu)}</div></div>
@@ -961,6 +994,11 @@ export function instancesPage(c: PageCtx, versions: Map<string, string>): string
     t(c.lang, "instances"),
     `<h1>${ico("server")} ${L("instances")}</h1><p class="muted">${L("instancesConnected", { n: c.config.instances.length })}</p>${items}`,
   );
+}
+
+export function askPage(c: PageCtx, extra: { ask?: string; notice?: string } = {}): string {
+  const L = (k: Key) => esc(t(c.lang, k));
+  return layout(c, "", t(c.lang, "askAbout"), `<h1>${ico("sparkles")} ${L("askAbout")}</h1>${askBox(c, `${c.config.basePath}/ask`, extra.ask, extra.notice)}`);
 }
 
 export function integrationsPage(c: PageCtx): string {

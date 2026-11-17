@@ -65,6 +65,17 @@ describe("Alerts triage", () => {
     expect(s.alerts.ingest("main", logN("yet another problem")).suppressed_reason).toBe("held back");
   });
 
+  it("resolve removes the incident so a later batch is a new alert", () => {
+    const s = setup();
+    const a = s.alerts.ingest("main", logN("permission denied on ./x.py"));
+    expect(s.alerts.resolve(a.id)).toBe(true);
+    expect(s.alerts.get(a.id)!.status).toBe("resolved");
+    s.advance(61_000);
+    const b = s.alerts.ingest("main", logN("permission denied on ./x.py"));
+    expect(b.status).toBe("sent");
+    expect(b.id).not.toBe(a.id);
+  });
+
   it("mutes by pattern and unmutes", () => {
     const s = setup();
     const a = s.alerts.ingest("main", logN("timeout talking to redis"));

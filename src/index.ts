@@ -13,7 +13,7 @@ import * as ui from "./web/ui.ts";
 import type { PageCtx } from "./web/ui.ts";
 import { pickLang } from "./web/i18n.ts";
 import { configFromEnv, OidcGate } from "./auth/oidc-gate.ts";
-import { reviewLogs, summarizeAlert } from "./llm/review.ts";
+import { reviewLogs, summarizeAlert, askAbout } from "./llm/review.ts";
 
 /** Run one MCP tool in-process (the UI reuses the tools so both answer the same way). */
 async function callTool(ctx: ToolContext, name: string, args: Record<string, unknown>): Promise<string> {
@@ -197,7 +197,6 @@ async function main(): Promise<void> {
         } else if (process.env["UI_AUTH"] !== "none") {
           return send(res, 403, "UI disabled: set OIDC_ISSUER (recommended), TRUST_USER_HEADER, or UI_AUTH=none.");
         }
-        if (req.method !== "GET") return send(res, 405, "method not allowed");
         const pc: PageCtx = {
           db,
           config: cfg,
@@ -207,6 +206,91 @@ async function main(): Promise<void> {
           now: Date.now(),
           query: url.searchParams,
         };
+        const htmlOk = (html: string) => {
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "same-origin" });
+          return res.end(html);
+        };
+        const seeOther = (to: string) => {
+          res.writeHead(303, { Location: to, "Cache-Control": "no-store" });
+          return res.end();
+        };
+        if (req.method === "POST") {
+          const form = new URLSearchParams(await readBody(req, 32_000));
+          const action = form.get("action") ?? "";
+          const question = form.get("q") ?? "";
+          const runAsk = async (topic: string, evidence: string): Promise<{ ask?: string; notice?: string }> => {
+            if (!cfg.llm) return { notice: pc.lang === "fr" ? "Demander exige LLM_BASE_URL." : "Ask needs LLM_BASE_URL." };
+            try {
+              return { ask: await askAbout(cfg.llm, topic, evidence, question) };
+            } catch (e) {
+              return { notice: (e as Error).message.slice(0, 240) };
+            }
+          };
+          const aid = sub.match(/^\/alerts\/(\d+)$/);
+          if (aid) {
+            const id = Number(aid[1]);
+            if (action === "fix") {
+              alerts.resolve(id);
+              return seeOther(`${cfg.basePath}/alerts/${id}`);
+            }
+            if (action === "mute") {
+              alerts.mute(id);
+              return seeOther(`${cfg.basePath}/alerts/${id}`);
+            }
+            if (action === "ask") {
+              const a = alerts.get(id);
+              const extra = a
+                ? await runAsk(
+                    `Alert #${id} ${a.title}\nContainer: ${a.container_name}\nKind: ${a.kind} · ${a.source} · ${a.status}`,
+                    `${a.summary ?? ""}\n${a.sample ?? ""}`,
+                  )
+                : {};
+              return htmlOk(ui.alertDetail(pc, id, extra));
+            }
+          }
+          const fidPost = sub.match(/^\/findings\/(\d+)$/);
+          if (fidPost) {
+            const id = Number(fidPost[1]);
+            if (action === "fix") {
+              db.prepare("UPDATE findings SET status='resolved', resolved_at=? WHERE id=?").run(Date.now(), id);
+              return seeOther(`${cfg.basePath}/findings/${id}`);
+            }
+            if (action === "ignore") {
+              db.prepare("UPDATE findings SET ignored=1 WHERE id=?").run(id);
+              return seeOther(`${cfg.basePath}/findings/${id}`);
+            }
+            if (action === "ask") {
+              const f = db.prepare("SELECT * FROM findings WHERE id=?").get(id) as Record<string, string> | undefined;
+              const extra = f
+                ? await runAsk(`Finding #${id} ${f.headline}\nSeverity: ${f.severity}\n${f.why ?? ""}\nFix: ${f.fix ?? ""}`, String(f.containers))
+                : {};
+              return htmlOk(ui.findingDetail(pc, id, undefined, extra));
+            }
+          }
+          const mid = sub.match(/^\/metrics\/([^/]+)\/([^/]+)\/([^/]+)$/);
+          if (mid && action === "ask") {
+            const instance = decodeURIComponent(mid[1]!), host = decodeURIComponent(mid[2]!), name = decodeURIComponent(mid[3]!);
+            const extra = await runAsk(
+              `Container ${name} on ${host}`,
+              JSON.stringify(
+                db.prepare("SELECT avg(cpu_avg) cpu, max(cpu_max) cpuPk, avg(mem_avg) mem FROM metrics WHERE instance_id=? AND host=? AND container_name=? AND ts>=?").get(instance, host, name, Date.now() - 3_600_000),
+              ),
+            );
+            return htmlOk(ui.metricDetail(pc, instance, host, name, extra));
+          }
+          if (sub === "/ask" && action === "ask") {
+            const alertsTxt = (db.prepare("SELECT title, container_name, status FROM alerts WHERE ts>=? AND status='sent' ORDER BY ts DESC LIMIT 12").all(Date.now() - 24 * 3_600_000) as { title: string; container_name: string; status: string }[])
+              .map((a) => `- ${a.container_name}: ${a.title}`)
+              .join("\n");
+            const findsTxt = (db.prepare("SELECT headline, severity FROM findings WHERE status IN ('open','ongoing') AND ignored=0 ORDER BY updated DESC LIMIT 8").all() as { headline: string; severity: string }[])
+              .map((f) => `- ${f.severity} ${f.headline}`)
+              .join("\n");
+            const extra = await runAsk("Fleet overview (last 24h alerts + open findings)", `Alerts:\n${alertsTxt}\n\nFindings:\n${findsTxt}`);
+            return htmlOk(ui.askPage(pc, extra));
+          }
+          return send(res, 405, "method not allowed");
+        }
+        if (req.method !== "GET") return send(res, 405, "method not allowed");
         let html: string | undefined;
         const m = sub.match(/^\/metrics\/([^/]+)\/([^/]+)\/([^/]+)$/);
         const fid = sub.match(/^\/findings\/(\d+)$/);
@@ -266,6 +350,7 @@ async function main(): Promise<void> {
           for (const [k, v] of versions) if (!v) versions.delete(k);
           html = ui.instancesPage(pc, versions);
         } else if (sub === "/integrations") html = ui.integrationsPage(pc);
+        else if (sub === "/ask") html = ui.askPage(pc);
         if (html) {
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "same-origin" });
           return res.end(html);
