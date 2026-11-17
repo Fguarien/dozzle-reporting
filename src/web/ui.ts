@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
-import type { Db } from "../store/db.ts";
+import { kvGet, type Db } from "../store/db.ts";
 import type { Config } from "../config.ts";
 import { t, type Lang, type Key } from "./i18n.ts";
 import { ico, type IconName } from "./icons.ts";
+import type { LogHit, LogNote } from "./logfetch.ts";
 
 /** HTML escaping for every interpolated value. */
 export function esc(v: unknown): string {
@@ -17,6 +18,20 @@ export interface PageCtx {
   breakglass?: boolean;
   now: number;
   query: URLSearchParams;
+  /** Set by the logs page while Live is on. layout emits a refresh meta. */
+  refreshSec?: number;
+}
+
+/** Windows the findings page and the logs page both offer. */
+export const TIME_WINDOWS = ["15m", "30m", "45m", "1h", "6h", "12h", "24h", "7d", "30d"] as const;
+
+/** Relative window (`15m`, `6h`, `7d`) as milliseconds. Unknown text is undefined. */
+export function windowMs(w: string): number | undefined {
+  const m = /^(\d+)(m|h|d)$/.exec(w);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0 || n > 366) return undefined;
+  return n * (m[2] === "m" ? 60_000 : m[2] === "h" ? 3_600_000 : 86_400_000);
 }
 
 const H = 3_600_000;
@@ -102,7 +117,7 @@ pre{white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,SFMo
 .mc{display:block;text-decoration:none;margin:0;padding:14px 16px}
 .mc h3{font-size:14px;margin:0 0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
 .mc .l{font-size:12px;color:var(--muted)}
-.find{display:grid;grid-template-columns:14px 1fr 16px;gap:10px 12px;padding:16px 4px;border-bottom:1px solid var(--line);text-decoration:none;color:inherit}
+.find{display:grid;grid-template-columns:14px 1fr auto;gap:10px 12px;padding:16px 4px;border-bottom:1px solid var(--line);text-decoration:none;color:inherit}
 .find:hover{background:var(--hover)}
 .find .dot{width:8px;height:8px;border-radius:50%;margin-top:7px;background:var(--warn)}
 .find .dot.high,.find .dot.critical{background:var(--err)}
@@ -138,6 +153,19 @@ pre{white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,SFMo
 .hist i{flex:1;display:block;border-radius:2px 2px 0 0;min-height:2px;background:var(--ok)}
 .hist i.warn{background:var(--warn)}.hist i.err{background:var(--err)}.hist i.mix{background:linear-gradient(to top,var(--ok) 40%,var(--warn) 70%,var(--err) 100%)}
 .logtbl{width:100%;font-size:13px}.logtbl td:first-child{white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums}
+.logtools{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:8px}
+.logtools select,.logbar select{border-radius:999px;background:var(--bg);border:1px solid var(--line);padding:6px 10px}
+.pill{border:1px solid var(--line);border-radius:999px;padding:6px 12px;background:var(--bg);color:var(--fg);text-decoration:none;font-size:13px}
+.pill.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.vol{display:flex;align-items:flex-end;gap:2px;height:84px;padding:8px 4px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);margin:4px 0 8px}
+.vol i{flex:1;display:flex;flex-direction:column-reverse;min-height:2px;border-radius:2px 2px 0 0;overflow:hidden;background:color-mix(in srgb,var(--line) 65%,transparent)}
+.vol i b{display:block;width:100%}
+.vol i b.debug{background:#94a3b8}.vol i b.info{background:#16a34a}.vol i b.log{background:#86efac}.vol i b.warn{background:#d97706}.vol i b.err{background:#dc2626}
+.volhead{display:flex;justify-content:space-between;gap:12px;align-items:center;color:var(--muted);font-size:12.5px;margin-top:12px}
+.evtrow{display:grid;grid-template-columns:9.5rem 11rem 1fr;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line);font-size:13.5px;align-items:baseline}
+.cause{border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0;background:var(--panel)}
+.cause h2{margin:0 0 6px;font-size:15px;display:flex;gap:8px;align-items:center}
+.cause p{margin:0 0 10px;white-space:pre-wrap}
 .logtbl .lv{font-size:11px}.hostrow{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line);font-size:13.5px}
 .hostrow:last-child{border-bottom:0}.hostrow .nm{flex:1;font-weight:500}.hostrow .tag{font-size:10.5px;border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--muted);text-transform:lowercase}
 .chart{width:100%;height:180px}.chart .axis{font:10px ui-sans-serif,system-ui,sans-serif;fill:var(--muted)}
@@ -195,6 +223,8 @@ export function layout(c: PageCtx, active: string, title: string, body: string):
   const inst = c.config.instances[0];
   const instLabel = inst?.name ?? "dozzle";
   const fTab = c.query.get("tab") ?? "open";
+  const fWin = windowMs(c.query.get("w") ?? "") ? c.query.get("w")! : "";
+  const fW = fWin ? `&w=${encodeURIComponent(fWin)}` : "";
   const findingsOpen = active === "/findings" || active.startsWith("/findings/");
   const alertsOpen = active.startsWith("/alerts");
   const integOpen = active === "/integrations";
@@ -202,20 +232,23 @@ export function layout(c: PageCtx, active: string, title: string, body: string):
     `<a class="n ${on(href)}" href="${b}${href}">${ico(icon)} ${L(key)}${extra}</a>`;
   const sub = (href: string, key: Key, n?: number, isOn?: boolean) =>
     `<a class="${isOn ? "on" : ""}" href="${b}${href}">${L(key)}${n !== undefined ? ` ${n}` : ""}</a>`;
-  const fCount = (w: string) => (c.db.prepare(`SELECT count(*) n FROM findings WHERE ${w}`).get() as { n: number }).n;
+  const fSpan = windowMs(c.query.get("w") ?? "");
+  const fTime = fSpan ? " AND updated>=?" : "";
+  const fArgs = fSpan ? [c.now - fSpan] : [];
+  const fCount = (w: string) => (c.db.prepare(`SELECT count(*) n FROM findings WHERE ${w}${fTime}`).get(...fArgs) as { n: number }).n;
   const nOpen = findingsOpen ? fCount("status IN ('open','ongoing') AND ignored=0") : 0;
   const nAll = findingsOpen ? fCount("1=1") : 0;
   const nRes = findingsOpen ? fCount("status='resolved'") : 0;
   const nIgn = findingsOpen ? fCount("ignored=1") : 0;
   return `<!doctype html><html lang="${c.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(title)} · ${L("brand")}</title><style>${CSS}</style><script>${THEME_JS}</script>${extraHead(c.config)}</head>
+<title>${esc(title)} · ${L("brand")}</title><style>${CSS}</style><script>${THEME_JS}</script>${c.refreshSec ? `<meta http-equiv="refresh" content="${Math.min(60, Math.max(5, Math.round(c.refreshSec)))}">` : ""}${extraHead(c.config)}</head>
 <body><div class="shell"><aside>
   <div class="brand">${ico("cloud", "logo")} ${L("brand")} <small>${L("selfHosted")}</small></div>
   <div class="inst">${ico("server")}<span class="grow" title="${esc(instLabel)}">${esc(instLabel)}</span>${ico("chevronDown")}</div>
   <nav>
     ${navItem("", "overview", "house")}
     ${navItem("/findings", "findings", "bell", ico("chevronRight", "ch"))}
-    ${findingsOpen ? `<div class="sub">${sub("/findings?tab=open", "needsAttention", nOpen, fTab === "open")}${sub("/findings?tab=all", "all", nAll, fTab === "all")}${sub("/findings?tab=resolved", "resolved", nRes, fTab === "resolved")}${sub("/findings?tab=ignored", "ignored", nIgn, fTab === "ignored")}</div>` : ""}
+    ${findingsOpen ? `<div class="sub">${sub(`/findings?tab=open${fW}`, "needsAttention", nOpen, fTab === "open")}${sub(`/findings?tab=all${fW}`, "all", nAll, fTab === "all")}${sub(`/findings?tab=resolved${fW}`, "resolved", nRes, fTab === "resolved")}${sub(`/findings?tab=ignored${fW}`, "ignored", nIgn, fTab === "ignored")}</div>` : ""}
     ${navItem("/updates", "updates", "refresh")}
     ${navItem("/alerts", "alerts", "bell", ico("chevronRight", "ch"))}
     ${alertsOpen ? `<div class="sub">${sub("/alerts", "alerts", undefined, active === "/alerts")}${sub("/alerts/events", "events", undefined, active === "/alerts/events")}${sub("/alerts/muted", "muted", undefined, active === "/alerts/muted")}</div>` : ""}
@@ -444,8 +477,72 @@ export function parseLogsql(raw: string): { query?: string; container?: string; 
     for (const x of n.split(",")) levels.push(x.toLowerCase());
     return "";
   });
-  s = s.replace(/\bAND\b/gi, " ").replace(/\s+/g, " ").trim();
+  s = s.replace(/^\s*LogsQL\s+/i, "").replace(/\bAND\b/gi, " ").replace(/\s+/g, " ").trim();
   return { query: s || undefined, container, levels: levels.length ? levels : undefined };
+}
+
+const LOG_LEVELS = ["debug", "info", "log", "warn", "error"] as const;
+
+export function levelBucket(level: string): (typeof LOG_LEVELS)[number] {
+  const l = level.toLowerCase();
+  if (l === "error" || l === "err" || l === "fatal") return "error";
+  if (l === "warn" || l === "warning") return "warn";
+  if (l === "info") return "info";
+  if (l === "debug" || l === "trace") return "debug";
+  return "log";
+}
+
+/** Split [from, to] into n buckets and count lines by level. */
+export function logBars(rows: { ts: number; level: string }[], from: number, to: number, n = 24): number[][] {
+  const span = Math.max(1, to - from);
+  const bars = Array.from({ length: n }, () => [0, 0, 0, 0, 0]);
+  for (const r of rows) {
+    if (!r.ts) continue;
+    let i = Math.floor(((r.ts - from) / span) * n);
+    if (i < 0) i = 0;
+    if (i >= n) i = n - 1;
+    bars[i]![LOG_LEVELS.indexOf(levelBucket(r.level))]!++;
+  }
+  return bars;
+}
+
+/** Pull method, path, status and duration out of a line when it looks like an access log. */
+export function parseAccess(message: string): { method: string; path: string; status: string; duration: string; text: string } {
+  let method = "";
+  let path = "";
+  let status = "";
+  let duration = "";
+  let text = message;
+  if (message.trimStart().startsWith("{")) {
+    try {
+      const j = JSON.parse(message) as Record<string, unknown>;
+      if (typeof j.method === "string") method = j.method;
+      const p = j.path ?? j.url ?? j.uri;
+      if (typeof p === "string") path = p;
+      const s = j.status ?? j.statusCode;
+      if (s != null && typeof s !== "object") status = String(s);
+      const d = j.duration ?? j.latency;
+      if (d != null && typeof d !== "object") duration = String(d);
+      if (typeof j.message === "string") text = j.message;
+      else if (typeof j.msg === "string") text = j.msg;
+    } catch {
+      /* not JSON */
+    }
+  }
+  const quoted = message.match(/"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)(?:\s+HTTP\/[\d.]+)?"\s+(\d{3})/i);
+  const bare = message.match(/\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/\S*)/);
+  const http = quoted ?? bare;
+  if (http) {
+    method = method || http[1]!.toUpperCase();
+    path = path || http[2]!;
+    if (http[3]) status = status || http[3];
+  }
+  const st = message.match(/\bstatus[=: ](\d{3})\b/i);
+  if (st && !status) status = st[1]!;
+  const dur = message.match(/\b(?:duration|latency|took)[=: ](\d+(?:\.\d+)?)(ms|µs|us|s)?\b/i);
+  if (dur && !duration) duration = `${dur[1]}${dur[2] ?? ""}`;
+  if (path) text = path;
+  return { method, path, status, duration, text };
 }
 
 export function parseLogText(text: string): LogRow[] {
@@ -612,9 +709,13 @@ ${open.length ? open.map((f) => findingRow(c, f)).join("") : `<div class="card">
 export function findings(c: PageCtx): string {
   const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
   const tab = c.query.get("tab") ?? "open";
+  const win = windowMs(c.query.get("w") ?? "") ? c.query.get("w")! : "all";
+  const span = win === "all" ? undefined : windowMs(win);
+  const time = span ? " AND updated>=?" : "";
+  const timeArgs = span ? [c.now - span] : [];
   const where = tab === "all" ? "1=1" : tab === "resolved" ? "status='resolved'" : tab === "ignored" ? "ignored=1" : "status IN ('open','ongoing') AND ignored=0";
-  const rows = c.db.prepare(`SELECT * FROM findings WHERE ${where} ORDER BY (status='resolved'), updated DESC LIMIT 200`).all() as Record<string, string & number>[];
-  const count = (w: string) => (c.db.prepare(`SELECT count(*) n FROM findings WHERE ${w}`).get() as { n: number }).n;
+  const rows = c.db.prepare(`SELECT * FROM findings WHERE ${where}${time} ORDER BY (status='resolved'), updated DESC LIMIT 200`).all(...timeArgs) as Record<string, string & number>[];
+  const count = (w: string) => (c.db.prepare(`SELECT count(*) n FROM findings WHERE ${w}${time}`).get(...timeArgs) as { n: number }).n;
   const b = c.config.basePath;
   const tabs = [
     ["open", "needsAttention", count("status IN ('open','ongoing') AND ignored=0")],
@@ -624,13 +725,16 @@ export function findings(c: PageCtx): string {
   ] as const;
   const when = `${String(c.config.reviewHour).padStart(2, "0")}:00`;
   const tabIco: Record<string, IconName> = { open: "bell", all: "list", resolved: "bell", ignored: "filter" };
+  const href = (k: string, w: string) => `${b}/findings?tab=${k}${w === "all" ? "" : `&w=${encodeURIComponent(w)}`}`;
+  const wins = ["all", ...TIME_WINDOWS] as const;
   return layout(
     c,
     "/findings",
     t(c.lang, "findings"),
     `<div class="pagehead"><div><h1>${ico("bell")} ${L("findings")}</h1><p class="muted">${L("findingsIntro")}</p></div>
 <div class="right">${c.config.llm ? L("nextReview", { when }) : L("noLlm")}</div></div>
-<div class="tabs">${tabs.map(([k, l, n]) => `<a class="${tab === k ? "on" : ""}" href="${b}/findings?tab=${k}">${ico(tabIco[k] ?? "bell")} ${L(l)} ${n}</a>`).join("")}</div>
+<div class="pills">${wins.map((w) => `<a class="${win === w ? "on" : ""}" href="${href(tab, w)}">${w === "all" ? L("windowAll") : w}</a>`).join("")}</div>
+<div class="tabs">${tabs.map(([k, l, n]) => `<a class="${tab === k ? "on" : ""}" href="${href(k, win)}">${ico(tabIco[k] ?? "bell")} ${L(l)} ${n}</a>`).join("")}</div>
 ${rows.length ? rows.map((f) => findingRow(c, f)).join("") : `<div class="card">✓ ${L("nothingToFix")}</div>`}`,
   );
 }
@@ -698,7 +802,7 @@ export function alertsPage(c: PageCtx, tab: "alerts" | "events" | "muted"): stri
                 ${a.summary ? `<p class="why">${esc(a.summary)}</p>` : ""}
                 <div class="meta"><span>${esc(a.status === "sent" ? t(c.lang, "alertSent") : a.status === "muted" ? t(c.lang, "muted") : `${t(c.lang, "suppressed")} · ${a.suppressed_reason}`)}</span><span>${esc(a.container_name ?? "")}</span><span>${L("eventsN", { n: a.event_count })}</span>${a.absorbed ? `<span>${a.absorbed} ${L("absorbed")}</span>` : ""}</div>
               </div>
-              <span class="muted" style="font-size:12.5px;white-space:nowrap">${relTime(a.ts, c)}</span>
+              <span class="muted" style="font-size:12.5px;white-space:nowrap">${relTime(a.ts, c)} ${ico("chevronRight", "ch")}</span>
             </a>`;
           })
           .join("")
@@ -804,43 +908,53 @@ ${
 }`;
 }
 
+interface Invest {
+  text?: string;
+  error?: string;
+  at?: number;
+  checked?: string[];
+}
+
+function investOf(db: Db, id: number): Invest | undefined {
+  const raw = kvGet(db, `alert:invest:${id}`);
+  if (!raw) return undefined;
+  try {
+    const j = JSON.parse(raw) as Invest;
+    return j && typeof j === "object" ? j : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function evidenceText(a: Record<string, string & number>): string {
+  const sample = a.sample == null ? "" : String(a.sample);
+  if (String(a.kind) === "metric") {
+    const bits = parseSample(sample);
+    if (bits.attrs.cpu) return `cpu ${bits.attrs.cpu}% · memory ${bits.attrs.memory ?? ""}%`;
+  }
+  if (String(a.kind) === "event") {
+    const bits = parseSample(sample);
+    const code = bits.attrs.exitCode;
+    return `${bits.name || a.kind}${code != null ? ` (exit code ${code})` : ""}`;
+  }
+  return sample || String(a.summary ?? "");
+}
+
 export function alertDetail(c: PageCtx, id: number, extra: { ask?: string; notice?: string } = {}): string {
   const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
   const a = c.db.prepare("SELECT * FROM alerts WHERE id=?").get(id) as Record<string, string & number> | undefined;
   const b = c.config.basePath;
   if (!a) return layout(c, "/alerts", t(c.lang, "alerts"), `<a class="back" href="${b}/alerts">${ico("chevronRight")} ${L("backToAlerts")}</a><p class="muted">#${id}</p>`);
-  const hn = hostNames(c.db);
-  const hostLabel = hn.get(String(a.host ?? "")) || String(a.host ?? "");
-  const related = a.container_name
-    ? (c.db
-        .prepare("SELECT ts,name,level,detail,host,container_name FROM events WHERE container_name=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 20")
-        .all(a.container_name, Number(a.ts) - 15 * 60_000, Number(a.last_ts || a.ts) + 10 * 60_000) as Record<string, string & number>[])
-    : [];
-  const bits = parseSample(a.sample == null ? null : String(a.sample));
   const cont = c.db
-    .prepare("SELECT instance_id, host, id, name FROM containers WHERE name=? ORDER BY (state='running') DESC, last_seen DESC LIMIT 1")
-    .get(String(a.container_name ?? "")) as { instance_id: string; host: string; id: string; name: string } | undefined;
-  const inst = c.config.instances.find((i) => i.id === String(a.instance_id)) ?? c.config.instances[0];
+    .prepare("SELECT instance_id, host, name FROM containers WHERE name=? ORDER BY (state='running') DESC, last_seen DESC LIMIT 1")
+    .get(String(a.container_name ?? "")) as { instance_id: string; host: string; name: string } | undefined;
   const metricsHref = cont ? `${b}/metrics/${encodeURIComponent(cont.instance_id)}/${encodeURIComponent(cont.host)}/${encodeURIComponent(cont.name)}` : `${b}/metrics`;
-  const openHref = inst ? esc(inst.url) : "#";
-  const attrLine = (name: string, attrs: Record<string, string>) =>
-    `<div class="kvb"><span>${ico("bell")} <b>${esc(name || a.kind)}</b></span>${Object.entries(attrs)
-      .slice(0, 8)
-      .map(([k, v]) => `<span>${esc(k)}=${esc(v)}</span>`)
-      .join("")}</div>`;
-  const eventBlocks =
-    related.length || bits.name
-      ? (related.length ? related : [{ ts: a.ts, name: bits.name || a.kind, detail: a.sample, host: a.host, container_name: a.container_name, level: a.level }]).map((e) => {
-          const parsed = e.detail != null ? parseSample(String(e.detail)) : bits;
-          const extra = parsed.attrs.exitCode != null ? ` (exit code ${esc(parsed.attrs.exitCode)})` : "";
-          return `<details class="evt" open>
-            <summary><span class="muted">${fmtTime(Number(e.ts), c)}</span> <span>Container event: ${esc(String(e.name))}${extra} ${esc(String(e.container_name ?? ""))}</span></summary>
-            ${attrLine(String(e.name), parsed.attrs)}
-            <div class="meta muted"><span>${esc(e.container_name ?? "")}</span><span>${esc(hn.get(String(e.host ?? "")) || String(e.host ?? hostLabel))}</span><span>${fmtTime(Number(e.ts), c, true)}</span>
-            <span style="margin-left:auto"><a class="link" href="${openHref}">${L("openEvent")}</a> · <a class="link" href="${metricsHref}">${L("viewMetrics")}</a></span></div>
-          </details>`;
-        }).join("")
-      : `<p class="muted">—</p>`;
+  const logsHref = `${b}/logs?container=${encodeURIComponent(String(a.container_name ?? ""))}&after=1h`;
+  const line = evidenceText(a).slice(0, 500);
+  const invest = investOf(c.db, id);
+  const checks = [line].filter(Boolean);
+  if (invest?.checked?.includes("logs")) checks.push(t(c.lang, "checkedLogs"));
+  if (invest?.checked?.includes("events")) checks.push(t(c.lang, "checkedEvents"));
   const when = new Date(Number(a.ts)).toLocaleString(c.lang === "fr" ? "fr-BE" : "en-US", {
     timeZone: c.config.timezone,
     month: "short",
@@ -850,17 +964,46 @@ export function alertDetail(c: PageCtx, id: number, extra: { ask?: string; notic
     minute: "2-digit",
     hour12: c.lang !== "fr",
   });
+  const done = Boolean(invest?.text);
+  const causeBody = done
+    ? esc(invest?.text)
+    : invest?.error === "no-llm"
+      ? L("askNeedLlm")
+      : invest?.error
+        ? esc(invest.error)
+        : L("rootUnclearBody");
+  const investigated = invest?.at
+    ? L("investigatedAt", {
+        when: new Date(invest.at).toLocaleString(c.lang === "fr" ? "fr-BE" : "en-US", {
+          timeZone: c.config.timezone,
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: c.lang !== "fr",
+        }),
+      })
+    : "";
   return layout(
     c,
     "/alerts",
     String(a.title ?? t(c.lang, "alerts")),
     `<a class="back" href="${b}/alerts">${ico("chevronRight")} ${L("backToAlerts")}</a>
 <div class="pagehead"><h1>${esc(a.title)}</h1>${actionBar(c, `${b}/alerts/${id}`, { fix: a.status !== "resolved", mute: true, ask: true })}</div>
-<p class="muted">${esc(a.container_name ?? "")} · ${esc(when)}${a.status === "resolved" ? ` · ${L("markedFixed")}` : a.status === "muted" ? ` · ${L("muted")}` : ""}</p>
+<p class="muted">${esc(a.container_name ?? "")} / ${esc(when)}${a.status === "resolved" ? ` · ${L("markedFixed")}` : a.status === "muted" ? ` · ${L("muted")}` : ""}</p>
 ${askBox(c, `${b}/alerts/${id}`, extra.ask, extra.notice)}
-${a.summary ? `<p>${esc(a.summary)}</p>` : bits.attrs.message && bits.name === "log" ? `<p>${esc(bits.attrs.message)}</p>` : ""}
-<h2>${L("events")} ${Number(a.event_count) || related.length || 1}</h2>
-${eventBlocks}`,
+${a.summary ? `<p>${esc(a.summary)}</p>` : line && String(a.kind) === "log" ? `<p>${esc(line)}</p>` : ""}
+<div class="cause">
+  <h2>${ico("search")} ${done ? L("investigation") : L("rootUnclear")}</h2>
+  <p>${causeBody}</p>
+  ${investigated ? `<p class="muted">${investigated}</p>` : ""}
+  ${done ? "" : `<form method="post" action="${b}/alerts/${id}"><input type="hidden" name="action" value="investigate"><button class="ask" type="submit">${ico("search")} ${L("runInvestigation")}</button></form>`}
+</div>
+<details class="evt"><summary>${L("whatChecked", { n: checks.length })}</summary>
+<ul>${checks.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></details>
+<h2>${L("events")} ${Number(a.event_count) || 1}</h2>
+<div class="evtrow"><span class="muted">${fmtTime(Number(a.ts), c)}</span><a class="link" href="${logsHref}">${esc(a.container_name ?? "")}</a><span>${esc(line || "—")}</span></div>
+<p class="muted"><a class="link" href="${metricsHref}">${L("viewMetrics")}</a></p>`,
   );
 }
 
@@ -992,53 +1135,98 @@ ${askBox(c, `${b}/metrics/${encodeURIComponent(instance)}/${encodeURIComponent(h
   );
 }
 
-export function logsPage(c: PageCtx, result: string | undefined): string {
-  const L = (k: Key) => esc(t(c.lang, k));
+export interface LogSearch {
+  rows: LogHit[];
+  ms: number;
+  from: number;
+  to: number;
+  note?: LogNote;
+}
+
+const LOG_AFTER = ["15m", "30m", "45m", "1h", "6h", "12h", "24h", "7d"] as const;
+
+function clock(ms: number, c: PageCtx): string {
+  return new Date(ms).toLocaleString(c.lang === "fr" ? "fr-BE" : "en-GB", {
+    timeZone: c.config.timezone,
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+export function logsPage(c: PageCtx, result?: LogSearch): string {
+  const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
   const q = c.query;
-  const rows = result ? parseLogText(result) : [];
+  const b = c.config.basePath;
+  const names = c.db.prepare("SELECT name FROM containers WHERE state='running' GROUP BY name ORDER BY name COLLATE NOCASE LIMIT 500").all() as { name: string }[];
+  const selected = q.get("container") ?? "";
+  const after = LOG_AFTER.includes(q.get("after") as (typeof LOG_AFTER)[number]) ? q.get("after")! : "15m";
+  const live = q.get("live") === "1";
   const qVal = q.get("q") ?? "";
-  const buckets = new Map<string, { n: number; err: number }>();
-  for (const r of rows) {
-    const hour = (r.ts || "").slice(0, 13);
-    if (!hour) continue;
-    const e = buckets.get(hour) ?? { n: 0, err: 0 };
-    e.n++;
-    if (lvClass(r.level) === "err") e.err++;
-    buckets.set(hour, e);
-  }
-  const histKeys = [...buckets.keys()].sort();
-  const maxN = Math.max(1, ...[...buckets.values()].map((x) => x.n));
-  const hist =
-    histKeys.length > 1
-      ? `<div class="muted">${L("volume")} · ${rows.length} events</div><div class="hist">${histKeys
-          .map((k) => {
-            const b = buckets.get(k)!;
-            return `<i class="${b.err ? "err" : ""}" style="height:${Math.max(4, Math.round((b.n / maxN) * 64))}px" title="${esc(k)}"></i>`;
-          })
-          .join("")}</div>`
-      : "";
+  const rows = result?.rows ?? [];
+  const bars = result ? logBars(rows, result.from, result.to, 32) : [];
+  const maxN = Math.max(1, ...bars.map((x) => x.reduce((s, n) => s + n, 0)));
+  const hist = result
+    ? `<div class="vol">${bars
+        .map((counts) => {
+          const total = counts.reduce((s, n) => s + n, 0);
+          const h = Math.max(2, Math.round((total / maxN) * 72));
+          const parts = counts
+            .map((n, i) => (n ? `<b class="${["debug", "info", "log", "warn", "err"][i]}" style="flex:${n}"></b>` : ""))
+            .join("");
+          return `<i style="height:${h}px">${parts}</i>`;
+        })
+        .join("")}</div>`
+    : "";
+  const note =
+    result?.note?.kind === "missing"
+      ? `<p class="muted">${L("noSuchContainer", { name: result.note.name ?? "" })}</p>`
+      : result?.note?.kind === "capped"
+        ? `<p class="muted">${L("logCap", { n: result.note.n ?? 0, total: result.note.total ?? 0 })}</p>`
+        : "";
+  const dash = "—";
+  const table = result
+    ? `<p class="muted">${L("eventsLoaded", { n: rows.length, ms: result.ms })}</p>
+       ${rows.length ? "" : `<p class="muted">${L("noLogMatch")}</p>`}
+       <table class="logtbl"><tr><th>${L("when")}</th><th>${L("container")}</th><th>${L("level")}</th><th>${L("method")}</th><th>${L("message")}</th><th>${L("status")}</th><th>${L("duration")}</th></tr>${rows
+         .map((r) => {
+           const acc = parseAccess(r.message);
+           const when = r.ts ? clock(r.ts, c) : dash;
+           return `<tr><td class="mono">${esc(when)}</td><td class="mono"><a class="link" href="${b}/logs?container=${encodeURIComponent(r.container)}&after=${encodeURIComponent(after)}">${esc(r.container)}</a></td><td><span class="chip ${lvClass(r.level)} lv">${esc(r.level || dash)}</span></td><td class="mono">${esc(acc.method || dash)}</td><td>${esc((acc.text || r.message).slice(0, 400))}</td><td class="mono">${esc(acc.status || dash)}</td><td class="mono">${esc(acc.duration || dash)}</td></tr>`;
+         })
+         .join("")}</table>`
+    : "";
   return layout(
     c,
     "/logs",
     t(c.lang, "logs"),
-    `<h1>${ico("terminal")} ${L("logs")}</h1><p class="muted">${L("logsIntro")}</p>
-<form class="logbar" action="${c.config.basePath}/logs">${ico("search")}
-<input name="q" placeholder="${L("logsql")}  level:error AND container_name:nginx" value="${esc(qVal)}" style="flex:1">
-<select name="after">${["15m", "1h", "6h", "24h", "7d"].map((w) => `<option ${q.get("after") === w || (!q.get("after") && w === "15m") ? "selected" : ""}>${w}</option>`).join("")}</select>
+    `<div class="pagehead"><div><h1>${ico("terminal")} ${L("logs")}</h1><p class="muted">${L("logsIntro")}</p></div>
+<form method="get" action="${b}/logs" class="logtools">
+<select name="container" onchange="this.form.submit()"><option value="">${L("allContainers")}</option>${names.map((n) => `<option value="${esc(n.name)}" ${n.name === selected ? "selected" : ""}>${esc(n.name)}</option>`).join("")}</select>
+<input type="hidden" name="q" value="${esc(qVal)}">
+<input type="hidden" name="after" value="${esc(after)}">
+${live ? `<input type="hidden" name="live" value="1">` : ""}
+<a class="pill ${live ? "on" : ""}" href="${b}/logs?${new URLSearchParams({ ...(qVal ? { q: qVal } : {}), ...(selected ? { container: selected } : {}), after, ...(live ? {} : { live: "1" }) })}">${L("live")}</a>
+</form></div>
+<form class="logbar" method="get" action="${b}/logs">${ico("search")}
+<input type="hidden" name="container" value="${esc(selected)}">
+${live ? `<input type="hidden" name="live" value="1">` : ""}
+<input name="q" placeholder="level:error AND container_name:nginx" value="${esc(qVal)}" style="flex:1">
+<select name="after" onchange="this.form.submit()">${LOG_AFTER.map((w) => `<option value="${w}" ${after === w ? "selected" : ""}>${w}</option>`).join("")}</select>
 <button>${L("search")}</button></form>
-${hist}
 ${
-  result !== undefined
-    ? `<p class="muted">${rows.length} events loaded</p>
-       <table class="logtbl"><tr><th>${L("when")}</th><th>${L("container")}</th><th>${L("level")}</th><th>${L("message")}</th></tr>${rows
-         .slice(-200)
-         .map(
-           (r) =>
-             `<tr><td class="mono">${esc(r.ts)}</td><td class="mono"><a class="link" href="${c.config.basePath}/logs?q=${encodeURIComponent("container_name:" + r.container)}">${esc(r.container)}</a></td><td><span class="chip ${lvClass(r.level)} lv">${esc(r.level || "—")}</span></td><td>${esc(r.message.slice(0, 400))}</td></tr>`,
-         )
-         .join("")}</table>`
+  result
+    ? `<div class="volhead"><span>${L("volume")} · ${rows.length}</span><span class="legend"><span><b class="debug" style="background:#94a3b8"></b>debug</span><span><b style="background:#16a34a"></b>info</span><span><b style="background:#86efac"></b>log</span><span><b style="background:#d97706"></b>warn</span><span><b style="background:#dc2626"></b>error</span></span></div>
+<div class="muted">${esc(clock(result.from, c))} → ${esc(clock(result.to, c))}</div>
+${hist}`
     : ""
-}`,
+}
+${note}
+${table}
+<p class="muted">${L("logHint")}</p>`,
   );
 }
 

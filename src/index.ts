@@ -14,6 +14,7 @@ import type { PageCtx } from "./web/ui.ts";
 import { pickLang } from "./web/i18n.ts";
 import { configFromEnv, OidcGate } from "./auth/oidc-gate.ts";
 import { reviewLogs, summarizeAlert, askAbout } from "./llm/review.ts";
+import { fetchLogs } from "./web/logfetch.ts";
 import { createToken, findToken, listTokens, recordCall, revokeToken, toolOf } from "./mcp/tokens.ts";
 import { clearMute, isMuted, muteDeadline, muteUntil, setMuteUntil } from "./notify/mute.ts";
 import { digestText } from "./notify/digest.ts";
@@ -312,6 +313,39 @@ async function main(): Promise<void> {
                 : {};
               return htmlOk(ui.alertDetail(pc, id, extra));
             }
+            if (action === "investigate") {
+              const a = alerts.get(id);
+              const key = `alert:invest:${id}`;
+              if (!a) return seeOther(`${cfg.basePath}/alerts/${id}`);
+              if (!cfg.llm) {
+                kvSet(db, key, JSON.stringify({ error: "no-llm", at: Date.now(), checked: [] }));
+                return seeOther(`${cfg.basePath}/alerts/${id}`);
+              }
+              let logs = "";
+              if (a.container_name) {
+                try {
+                  const hit = await fetchLogs(db, ctx.clients, { container: a.container_name, after: "2h", levels: ["error", "warn", "fatal"], limit: 80, now: Date.now() });
+                  logs = hit.rows.map((r) => `${new Date(r.ts).toISOString()} ${r.level} ${r.message}`).join("\n").slice(0, 8000);
+                } catch (e) {
+                  logs = (e as Error).message.slice(0, 200);
+                }
+              }
+              const ev = (db.prepare("SELECT ts,name,detail FROM events WHERE container_name=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 15").all(a.container_name ?? "", a.ts - 15 * 60_000, (a.last_ts || a.ts) + 10 * 60_000) as { ts: number; name: string; detail: string | null }[])
+                .map((e) => `${new Date(e.ts).toISOString()} ${e.name} ${(e.detail ?? "").slice(0, 180)}`)
+                .join("\n");
+              try {
+                const text = await askAbout(
+                  cfg.llm,
+                  `Root cause of alert #${id} ${a.title ?? ""}\nContainer: ${a.container_name}`,
+                  `Sample:\n${a.sample ?? ""}\n\nSummary:\n${a.summary ?? ""}\n\nLogs (2h):\n${logs || "(none)"}\n\nEvents:\n${ev || "(none)"}`,
+                  "What is the root cause, and what should change? If the evidence is not enough, say the root cause is still unclear and name the missing piece.",
+                );
+                kvSet(db, key, JSON.stringify({ text, at: Date.now(), checked: ["logs", "events"] }));
+              } catch (e) {
+                kvSet(db, key, JSON.stringify({ error: (e as Error).message.slice(0, 240), at: Date.now(), checked: ["logs", "events"] }));
+              }
+              return seeOther(`${cfg.basePath}/alerts/${id}`);
+            }
           }
           const fidPost = sub.match(/^\/findings\/(\d+)$/);
           if (fidPost) {
@@ -394,21 +428,26 @@ async function main(): Promise<void> {
         else if (sub === "/metrics") html = ui.metricsPage(pc);
         else if (m) html = ui.metricDetail(pc, decodeURIComponent(m[1]!), decodeURIComponent(m[2]!), decodeURIComponent(m[3]!));
         else if (sub === "/logs") {
-          let result: string | undefined;
           const q = url.searchParams;
           const parsed = ui.parseLogsql(q.get("q") ?? "");
           const container = q.get("container") || parsed.container;
-          if (parsed.query || container || parsed.levels) {
-            const r = await callTool(ctx, "search_logs", {
+          const searching = Boolean(parsed.query || container || parsed.levels);
+          if (q.get("live") === "1" && searching) pc.refreshSec = 12;
+          let view: ui.LogSearch | undefined;
+          if (searching) {
+            const t0 = Date.now();
+            const after = q.get("after") || "15m";
+            const fetched = await fetchLogs(db, ctx.clients, {
               query: parsed.query,
-              container_name: container,
-              level: parsed.levels,
-              after: q.get("after") || "15m",
+              container,
+              levels: parsed.levels,
+              after,
               limit: 200,
+              now: Date.now(),
             });
-            result = r;
+            view = { ...fetched, ms: Date.now() - t0 };
           }
-          html = ui.logsPage(pc, result);
+          html = ui.logsPage(pc, view);
         } else if (sub === "/instances") {
           html = ui.instancesPage(pc, await instanceVersions());
         } else if (sub === "/integrations") {

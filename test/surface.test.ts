@@ -2,8 +2,9 @@ import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
 import { openDb } from "../src/store/db.ts";
 import { DICT } from "../src/web/i18n.ts";
-import { hostRole, instancesPage, integrationsPage, metricsPage, verLabel, type PageCtx } from "../src/web/ui.ts";
+import { alertDetail, alertsPage, findings, hostRole, instancesPage, integrationsPage, logsPage, metricsPage, parseAccess, parseLogsql, verLabel, type PageCtx } from "../src/web/ui.ts";
 import type { Config } from "../src/config.ts";
+import { kvSet } from "../src/store/db.ts";
 import { createToken, findToken, revokeToken } from "../src/mcp/tokens.ts";
 import { digestText } from "../src/notify/digest.ts";
 import { isMuted, muteDeadline, nextMidnight, setMuteUntil } from "../src/notify/mute.ts";
@@ -73,6 +74,69 @@ describe("instances and metrics", () => {
     expect(metrics).toContain("CPU now</div><div class=\"v\">20%</div>");
     expect(metrics).toContain(">160%</b>");
     expect(metrics).toContain("peak 200%");
+  });
+});
+
+describe("logs, findings, alerts", () => {
+  it("shows the container filter, the live switch and the loaded lines", () => {
+    const c = page();
+    c.db.prepare("INSERT INTO containers(instance_id,id,host,name,state,first_seen,last_seen) VALUES(?,?,?,?,?,?,?)").run("main", "n", "local", "nginx", "running", now, now);
+    const bare = logsPage(c);
+    expect(bare).toContain("All containers");
+    expect(bare).toContain(">Live<");
+    expect(bare).toContain("nginx");
+    expect(bare).not.toContain("events loaded");
+    const html = logsPage(c, {
+      rows: [{ ts: now - 60_000, level: "info", container: "authentik-server", message: '127.0.0.1 - - "GET / HTTP/1.1" 302' }],
+      ms: 12,
+      from: now - 15 * 60_000,
+      to: now,
+    });
+    expect(html).toContain('class="vol"');
+    expect(html).toContain("1 events loaded in 12 ms");
+    expect(html).toContain("authentik-server");
+    expect(html).toContain(">GET<");
+    expect(html).toContain(">302<");
+    expect(html).toContain("<td>/</td>");
+    expect(parseAccess('127.0.0.1 - - "GET / HTTP/1.1" 302').status).toBe("302");
+    expect(parseLogsql("LogsQL level:error AND container_name:nginx")).toEqual({ query: undefined, container: "nginx", levels: ["error"] });
+  });
+
+  it("filters findings by the selected window", () => {
+    const c = page();
+    const ins = c.db.prepare("INSERT INTO findings(created,updated,last_seen,instance_id,fingerprint,severity,status,containers,headline) VALUES(?,?,?,?,?,?,?,?,?)");
+    ins.run(now - 3_600_000, now - 60_000, now - 60_000, "main", "fresh", "high", "open", "[]", "fresh finding");
+    ins.run(now - 5 * 86_400_000, now - 2 * 86_400_000, now - 2 * 86_400_000, "main", "old", "low", "open", "[]", "old finding");
+    const all = findings(c);
+    expect(all).toContain("fresh finding");
+    expect(all).toContain("old finding");
+    expect(all).toContain(">15m<");
+    expect(all).toContain(">12h<");
+    const recent = findings({ ...c, query: new URLSearchParams("w=15m") });
+    expect(recent).toContain("fresh finding");
+    expect(recent).not.toContain("old finding");
+  });
+
+  it("links an alert to a detail page with the investigation card", () => {
+    const c = page();
+    c.db.prepare("INSERT INTO alerts(ts,last_ts,instance_id,source,kind,level,fingerprint,title,status,container_name,sample,summary,event_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+      now, now, "main", "e2e", "log", "error", "fp1", "dzr-temoin signale une erreur fatale", "sent", "temoin", "temoin dozzle-reporting e2e 2026-11-16", "Le journal fatal contient le message.", 1,
+    );
+    const list = alertsPage(c, "alerts");
+    expect(list).toContain('href="/reporting/alerts/1"');
+    const detail = alertDetail(c, 1);
+    expect(detail).toContain("Back to alerts");
+    expect(detail).toContain("Root cause still unclear");
+    expect(detail).toContain("Run full investigation");
+    expect(detail).toContain("What was checked (1)");
+    expect(detail).toContain("temoin dozzle-reporting e2e 2026-11-16");
+    expect(detail).toContain('value="investigate"');
+    kvSet(c.db, "alert:invest:1", JSON.stringify({ text: "The fatal line is the test probe.", at: now, checked: ["logs", "events"] }));
+    const done = alertDetail(c, 1);
+    expect(done).toContain("The fatal line is the test probe.");
+    expect(done).toContain("Investigation");
+    expect(done).not.toContain("Root cause still unclear");
+    expect(done).toContain("What was checked (3)");
   });
 });
 
