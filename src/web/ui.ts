@@ -82,7 +82,7 @@ header.top form.search{flex:1;max-width:640px;position:relative}
 header.top form.search .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.4}
 header.top form.search input{width:100%;padding:8px 44px 8px 36px;border-radius:999px;background:var(--soft);border:1px solid var(--line)}
 header.top form.search kbd{position:absolute;right:10px;top:50%;transform:translateY(-50%);font:11px/1 ui-sans-serif,system-ui,sans-serif;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:3px 6px;background:var(--bg)}
-header.top .iconbtn{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--muted)}
+header.top .iconbtn{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--muted);text-decoration:none}
 header.top .iconbtn:hover{background:var(--hover);color:var(--fg)}
 header.top .avatar{width:28px;height:28px;border-radius:50%;background:#dc2626;color:#fff;display:inline-flex;align-items:center;justify-content:center;font:650 12px/1 ui-sans-serif,system-ui,sans-serif;text-decoration:none}
 button,input,select{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
@@ -262,6 +262,7 @@ export function layout(c: PageCtx, active: string, title: string, body: string):
   <div class="brand">${ico("cloud", "logo")} ${L("brand")} <small>${L("selfHosted")}</small></div>
   <div class="inst">${ico("server")}<span class="grow" title="${esc(instLabel)}">${esc(instLabel)}</span>${ico("chevronDown")}</div>
   <nav>
+    <a class="n" href="/">${ico("boxes")} ${L("viewer")}</a>
     ${navItem("", "overview", "house")}
     ${navItem("/findings", "findings", "bell", ico("chevronRight", "ch"))}
     ${findingsOpen ? `<div class="sub">${sub(`/findings?tab=open${fW}`, "needsAttention", nOpen, fTab === "open")}${sub(`/findings?tab=all${fW}`, "all", nAll, fTab === "all")}${sub(`/findings?tab=resolved${fW}`, "resolved", nRes, fTab === "resolved")}${sub(`/findings?tab=ignored${fW}`, "ignored", nIgn, fTab === "ignored")}</div>` : ""}
@@ -279,6 +280,9 @@ export function layout(c: PageCtx, active: string, title: string, body: string):
 </aside>
 <div><header class="top">
   <form class="search" action="${b}/logs">${ico("search")}<input name="q" placeholder="${L("searchAsk")}" value="${esc(c.query.get("q") ?? "")}" autocomplete="off"><kbd>${ico("kbd")}</kbd></form>
+  <a class="iconbtn" href="/notifications" title="${L("notifications")}">${ico("bell")}</a>
+  <a class="iconbtn" href="${b}" title="${L("brand")}">${ico("cloud")}</a>
+  <a class="iconbtn" href="/settings" title="${L("viewerSettings")}">${ico("cog")}</a>
   <a class="iconbtn" href="${b}/ask" title="${L("askAbout")}">${ico("sparkles")}</a>
   <button class="iconbtn" type="button" onclick="cycleLang()" title="${c.lang === "fr" ? "English" : "Français"}">${c.lang.toUpperCase()}</button>
   <button class="iconbtn" type="button" id="themebtn" onclick="cycleTheme()" title="${L("theme")}">${ico("sun")}</button>

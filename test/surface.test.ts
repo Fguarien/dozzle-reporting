@@ -2,7 +2,7 @@ import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
 import { openDb } from "../src/store/db.ts";
 import { DICT } from "../src/web/i18n.ts";
-import { alertDetail, alertsPage, findings, hostRole, instancesPage, integrationsPage, logsPage, metricsPage, parseAccess, parseLogsql, verLabel, type PageCtx } from "../src/web/ui.ts";
+import { alertDetail, alertsPage, findings, hostRole, instancesPage, integrationsPage, layout, logsPage, metricsPage, parseAccess, parseLogsql, verLabel, type PageCtx } from "../src/web/ui.ts";
 import type { Config } from "../src/config.ts";
 import { kvSet } from "../src/store/db.ts";
 import { createToken, findToken, revokeToken } from "../src/mcp/tokens.ts";
@@ -44,6 +44,17 @@ describe("labels", () => {
 
   it("keeps the same keys in both languages", () => {
     expect(Object.keys(DICT.fr).sort()).toEqual(Object.keys(DICT.en).sort());
+  });
+
+  it("puts the viewer and the cloud pages in the same menu", () => {
+    const html = layout(page(), "", "Overview", "");
+    expect(html).toContain('href="/">');
+    expect(html).toContain("Containers</a>");
+    expect(html).toContain('href="/reporting/findings"');
+    expect(html).toContain('href="/reporting/logs"');
+    expect(html).toContain('href="/notifications"');
+    expect(html).toContain('href="/settings"');
+    expect(html).toContain('href="/reporting/ask"');
   });
 });
 
