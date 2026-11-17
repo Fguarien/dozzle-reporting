@@ -431,23 +431,18 @@ async function main(): Promise<void> {
           const q = url.searchParams;
           const parsed = ui.parseLogsql(q.get("q") ?? "");
           const container = q.get("container") || parsed.container;
-          const searching = Boolean(parsed.query || container || parsed.levels);
-          if (q.get("live") === "1" && searching) pc.refreshSec = 12;
-          let view: ui.LogSearch | undefined;
-          if (searching) {
-            const t0 = Date.now();
-            const after = q.get("after") || "15m";
-            const fetched = await fetchLogs(db, ctx.clients, {
-              query: parsed.query,
-              container,
-              levels: parsed.levels,
-              after,
-              limit: 200,
-              now: Date.now(),
-            });
-            view = { ...fetched, ms: Date.now() - t0 };
-          }
-          html = ui.logsPage(pc, view);
+          if (q.get("live") === "1") pc.refreshSec = 12;
+          const t0 = Date.now();
+          const after = q.get("after") || "15m";
+          const fetched = await fetchLogs(db, ctx.clients, {
+            query: parsed.query,
+            container,
+            levels: parsed.levels,
+            after,
+            limit: 200,
+            now: Date.now(),
+          });
+          html = ui.logsPage(pc, { ...fetched, ms: Date.now() - t0 });
         } else if (sub === "/instances") {
           html = ui.instancesPage(pc, await instanceVersions());
         } else if (sub === "/integrations") {
