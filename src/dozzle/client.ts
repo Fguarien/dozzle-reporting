@@ -64,6 +64,19 @@ export interface SseMessage {
   data: string;
 }
 
+/**
+ * Dozzle's windowed fetch keeps 500 events (`defaultFetchSize` in v11.4).
+ * `maxStart` above that is rejected. A backfill asks for this many, oldest first.
+ */
+export const LOG_PAGE = 500;
+
+/**
+ * A windowed fetch (`from` / `to` / `maxStart`) keeps a line only when its level
+ * is named. An empty level list drops every line. These are Dozzle's canonical
+ * levels, including `unknown` for a line it could not classify.
+ */
+const LOG_LEVELS = ["error", "warn", "info", "debug", "trace", "fatal", "unknown", "log"];
+
 export class DozzleError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -76,6 +89,22 @@ export class DozzleError extends Error {
  * Thin client over Dozzle's HTTP API (v11). Covers what the MCP tools and the collector need:
  * the SSE event stream, logs, inspect, actions, image checks and notification rules.
  */
+function eventMessage(m: unknown): string {
+  if (typeof m === "string") return m;
+  if (Array.isArray(m)) return m.map((x) => eventMessage(x && typeof x === "object" && "m" in x ? (x as { m: unknown }).m : x)).filter(Boolean).join("\n");
+  if (m && typeof m === "object") {
+    const o = m as Record<string, unknown>;
+    if (typeof o["message"] === "string") return o["message"];
+    if (typeof o["msg"] === "string") return o["msg"];
+    try {
+      return JSON.stringify(m);
+    } catch {
+      return "";
+    }
+  }
+  return m == null ? "" : String(m);
+}
+
 export class DozzleClient {
   private cookie?: string;
   readonly instance: InstanceConfig;
@@ -216,7 +245,7 @@ export class DozzleClient {
     if (opts.stderr !== false) form.set("stderr", "1");
     if (opts.from) form.set("from", opts.from.toISOString());
     if (opts.to) form.set("to", opts.to.toISOString());
-    for (const l of opts.levels ?? []) form.append("levels", l);
+    for (const l of opts.levels?.length ? opts.levels : LOG_LEVELS) form.append("levels", l);
     if (opts.filter) form.set("filter", opts.filter);
     const r = await this.request("/api/containers/logs", {
       method: "POST",
@@ -235,6 +264,70 @@ export class DozzleClient {
       }
     }
     return out.length > max ? out.slice(out.length - max) : out;
+  }
+
+  /**
+   * Oldest page of one container (Dozzle v11.4 `POST /api/containers/logs`).
+   * `format=jsonl` with a paging field keeps plain-text lines; without one,
+   * Dozzle sends JSON object messages only. `maxStart` stops at the first
+   * events, so a wide window does not come back as its newest 500 and skip
+   * the rest. Dozzle rejects `maxStart` above {@link LOG_PAGE}.
+   */
+  async logsBetween(host: string, id: string, from: Date, to: Date, max = LOG_PAGE): Promise<{ ts: number; level: string; message: string }[]> {
+    const page = Math.min(Math.max(1, max), LOG_PAGE);
+    const form = new URLSearchParams();
+    form.set("container", `${host}/${id}`);
+    form.set("stdout", "1");
+    form.set("stderr", "1");
+    form.set("format", "jsonl");
+    form.set("from", from.toISOString());
+    form.set("to", to.toISOString());
+    form.set("maxStart", String(page));
+    for (const l of LOG_LEVELS) form.append("levels", l);
+    const r = await this.request("/api/containers/logs", {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(20_000),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept-Encoding": "identity",
+      },
+    });
+    if (!r.ok) throw new DozzleError(r.status, `logs between → ${r.status} ${(await r.text()).slice(0, 200)}`);
+    const out: { ts: number; level: string; message: string }[] = [];
+    const reader = r.body?.getReader();
+    if (!reader) return out;
+    const dec = new TextDecoder();
+    let buf = "";
+    const take = (line: string) => {
+      if (!line.trim()) return;
+      try {
+        const j = JSON.parse(line) as { m?: unknown; ts?: number; l?: string };
+        const message = eventMessage(j.m).slice(0, 500);
+        const ts = Number(j.ts);
+        if (!message || !Number.isFinite(ts) || ts <= 0) return;
+        out.push({ ts, level: j.l || "unknown", message });
+      } catch {
+        /* skip a non-event line */
+      }
+    };
+    while (out.length < page) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl = buf.indexOf("\n");
+      while (nl >= 0) {
+        take(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        if (out.length >= page) {
+          await reader.cancel();
+          return out;
+        }
+        nl = buf.indexOf("\n");
+      }
+    }
+    if (buf.trim() && out.length < page) take(buf);
+    return out;
   }
 
   private mcpSession?: string;

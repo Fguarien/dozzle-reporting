@@ -187,6 +187,37 @@ CREATE TABLE IF NOT EXISTS mcp_calls (
   ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mcp_calls_ts ON mcp_calls(ts);
+
+-- One stored log line. The page reads this for the table and log_volume for the chart.
+CREATE TABLE IF NOT EXISTS log_lines (
+  id INTEGER PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  instance_id TEXT NOT NULL,
+  host TEXT NOT NULL,
+  container_id TEXT NOT NULL,
+  container_name TEXT NOT NULL,
+  level TEXT NOT NULL,
+  message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS log_lines_ts ON log_lines(ts);
+CREATE INDEX IF NOT EXISTS log_lines_name ON log_lines(container_name, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS log_lines_dedup ON log_lines(instance_id, container_id, ts, message);
+
+-- 15-minute counts, so the volume chart does not scan every line.
+CREATE TABLE IF NOT EXISTS log_volume (
+  bucket INTEGER NOT NULL,
+  container_name TEXT NOT NULL,
+  level TEXT NOT NULL,
+  n INTEGER NOT NULL,
+  PRIMARY KEY (bucket, container_name, level)
+);
+
+CREATE TABLE IF NOT EXISTS log_cursor (
+  instance_id TEXT NOT NULL,
+  container_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY (instance_id, container_id)
+);
 `;
 
 export function openDb(path: string): Db {
@@ -215,6 +246,8 @@ export function prune(db: Db, retentionDays: number, now = Date.now()): void {
   db.prepare("DELETE FROM findings WHERE status='resolved' AND resolved_at < ?").run(cut);
   db.prepare("DELETE FROM metric_roll WHERE ts < ?").run(cut);
   db.prepare("DELETE FROM mcp_calls WHERE ts < ?").run(now - 7 * 86_400_000);
+  db.prepare("DELETE FROM log_lines WHERE ts < ?").run(cut);
+  db.prepare("DELETE FROM log_volume WHERE bucket < ?").run(cut);
 }
 
 /**

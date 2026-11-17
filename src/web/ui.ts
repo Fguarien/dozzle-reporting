@@ -161,7 +161,23 @@ pre{white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,SFMo
 .vol i{flex:1;display:flex;flex-direction:column-reverse;min-height:2px;border-radius:2px 2px 0 0;overflow:hidden;background:color-mix(in srgb,var(--line) 65%,transparent)}
 .vol i b{display:block;width:100%}
 .vol i b.debug{background:#94a3b8}.vol i b.info{background:#16a34a}.vol i b.log{background:#86efac}.vol i b.warn{background:#d97706}.vol i b.err{background:#dc2626}
-.volhead{display:flex;justify-content:space-between;gap:12px;align-items:center;color:var(--muted);font-size:12.5px;margin-top:12px}
+.volhead{display:flex;justify-content:space-between;gap:12px;align-items:center;color:var(--muted);font-size:12.5px}
+.volcard{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:12px 14px 8px;margin:12px 0}
+.vol{cursor:crosshair;user-select:none}
+.volaxis{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin:2px 2px 8px;font-variant-numeric:tabular-nums}
+.loaded{display:flex;gap:16px;align-items:baseline;margin:10px 0 6px;font-size:14px}
+.loaded b{font-weight:650}
+.zoomhint{margin-left:10px}
+.voltitle b{color:var(--fg);font-weight:650}
+.logsql{color:var(--muted);font-size:13px;white-space:nowrap}
+.logtbl .lvdot{display:inline-flex;align-items:center;gap:6px}
+.logtbl .lvdot::before{content:"";width:8px;height:8px;border-radius:50%;background:#86efac;flex:none}
+.logtbl .lvdot.info::before{background:#16a34a}
+.logtbl .lvdot.warn::before{background:#d97706}
+.logtbl .lvdot.err::before{background:#dc2626}
+.logtbl .lvdot.debug::before{background:#94a3b8}
+.logtbl .ch{opacity:.35}
+.volhead .legend b{border-radius:2px}
 .evtrow{display:grid;grid-template-columns:9.5rem 11rem 1fr;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line);font-size:13.5px;align-items:baseline}
 .cause{border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0;background:var(--panel)}
 .cause h2{margin:0 0 6px;font-size:15px;display:flex;gap:8px;align-items:center}
@@ -561,7 +577,8 @@ function lvClass(level: string): string {
   if (l === "error" || l === "fatal" || l === "err") return "err";
   if (l === "warn" || l === "warning") return "warn";
   if (l === "info") return "info";
-  return "q";
+  if (l === "debug" || l === "trace") return "debug";
+  return "log";
 }
 
 function chart(
@@ -1140,93 +1157,121 @@ export interface LogSearch {
   ms: number;
   from: number;
   to: number;
+  /** Every stored line in the window. The table only shows `rows`. */
+  total?: number;
+  bars?: number[][];
   note?: LogNote;
 }
 
-const LOG_AFTER = ["15m", "30m", "45m", "1h", "6h", "12h", "24h", "7d"] as const;
-
-function clock(ms: number, c: PageCtx): string {
-  return new Date(ms).toLocaleString(c.lang === "fr" ? "fr-BE" : "en-GB", {
+function part(ms: number, c: PageCtx, type: Intl.DateTimeFormatPartTypes): string {
+  const parts = new Intl.DateTimeFormat(c.lang === "fr" ? "fr-BE" : "en-US", {
     timeZone: c.config.timezone,
     month: "numeric",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
-  });
+    hourCycle: "h23",
+  }).formatToParts(new Date(ms));
+  return parts.find((p) => p.type === type)?.value ?? "";
 }
+
+/** Axis label, month/day and clock, no year. `11/5 13:00:21`. */
+function axisClock(ms: number, c: PageCtx): string {
+  const h = part(ms, c, "hour").padStart(2, "0");
+  return `${part(ms, c, "month")}/${part(ms, c, "day")} ${h}:${part(ms, c, "minute")}:${part(ms, c, "second")}`;
+}
+
+/** Row clock with milliseconds. The milliseconds do not depend on the timezone. */
+function rowClock(ms: number, c: PageCtx): string {
+  const h = part(ms, c, "hour").padStart(2, "0");
+  return `${h}:${part(ms, c, "minute")}:${part(ms, c, "second")}.${String(Math.abs(ms) % 1000).padStart(3, "0")}`;
+}
+
+const LOG_ZOOM = `<script>(function(){var el=document.querySelector(".vol");if(!el)return;var from=Number(el.getAttribute("data-from")),to=Number(el.getAttribute("data-to")),x0=-1;el.addEventListener("pointerdown",function(e){x0=e.clientX;el.setPointerCapture(e.pointerId)});el.addEventListener("pointerup",function(e){if(x0<0)return;var box=el.getBoundingClientRect(),a=(Math.min(x0,e.clientX)-box.left)/box.width,b=(Math.max(x0,e.clientX)-box.left)/box.width;x0=-1;if(!(b-a>0.02)||!box.width)return;var span=to-from,u=new URL(location.href);u.searchParams.set("from",String(Math.round(from+Math.max(0,a)*span)));u.searchParams.set("to",String(Math.round(from+Math.min(1,b)*span)));u.searchParams.delete("live");location.assign(u.pathname+u.search)});el.addEventListener("dblclick",function(){var u=new URL(location.href);u.searchParams.delete("from");u.searchParams.delete("to");location.assign(u.pathname+u.search)})})();</script>`;
 
 export function logsPage(c: PageCtx, result?: LogSearch): string {
   const L = (k: Key, v?: Record<string, string | number>) => esc(t(c.lang, k, v));
   const q = c.query;
   const b = c.config.basePath;
-  const names = c.db.prepare("SELECT name FROM containers WHERE state='running' GROUP BY name ORDER BY name COLLATE NOCASE LIMIT 500").all() as { name: string }[];
+  const names = c.db.prepare(
+    `SELECT name FROM (
+       SELECT container_name AS name FROM log_volume
+       UNION
+       SELECT name FROM containers WHERE state='running'
+     ) WHERE name!='' ORDER BY name COLLATE NOCASE LIMIT 2000`,
+  ).all() as { name: string }[];
   const selected = q.get("container") ?? "";
-  const after = LOG_AFTER.includes(q.get("after") as (typeof LOG_AFTER)[number]) ? q.get("after")! : "15m";
   const live = q.get("live") === "1";
   const qVal = q.get("q") ?? "";
+  const fromQ = q.get("from") ?? "";
+  const toQ = q.get("to") ?? "";
+  const hidden = `${qVal ? `<input type="hidden" name="q" value="${esc(qVal)}">` : ""}${fromQ ? `<input type="hidden" name="from" value="${esc(fromQ)}">` : ""}${toQ ? `<input type="hidden" name="to" value="${esc(toQ)}">` : ""}${live ? `<input type="hidden" name="live" value="1">` : ""}`;
+  const keep = new URLSearchParams();
+  if (qVal) keep.set("q", qVal);
+  if (selected) keep.set("container", selected);
+  if (fromQ) keep.set("from", fromQ);
+  if (toQ) keep.set("to", toQ);
+  const liveHref = new URLSearchParams(keep);
+  if (live) liveHref.delete("live");
+  else liveHref.set("live", "1");
   const rows = result?.rows ?? [];
-  const bars = result ? logBars(rows, result.from, result.to, 32) : [];
+  const total = result ? (result.total ?? rows.length) : 0;
+  const bars = result ? (result.bars ?? logBars(rows, result.from, result.to, 48)) : [];
   const maxN = Math.max(1, ...bars.map((x) => x.reduce((s, n) => s + n, 0)));
+  const grouped = total.toLocaleString(c.lang === "fr" ? "fr-BE" : "en-US");
+  const endLabel = result && c.now - result.to < 120_000 ? L("rangeNow") : result ? esc(axisClock(result.to, c)) : "";
   const hist = result
-    ? `<div class="vol">${bars
+    ? `<div class="volcard"><div class="volhead"><span class="voltitle"><b>${L("volume")}</b> ${esc(grouped)} ${L("eventsWord")}</span><span class="zoomhint">${L("dragToZoom")}</span><span class="legend"><span><b style="background:#94a3b8"></b>debug</span><span><b style="background:#16a34a"></b>info</span><span><b style="background:#86efac"></b>log</span><span><b style="background:#d97706"></b>warn</span><span><b style="background:#dc2626"></b>error</span></span></div>
+<div class="vol" data-from="${result.from}" data-to="${result.to}">${bars
         .map((counts) => {
-          const total = counts.reduce((s, n) => s + n, 0);
-          const h = Math.max(2, Math.round((total / maxN) * 72));
+          const n = counts.reduce((s, x) => s + x, 0);
+          const h = Math.max(2, Math.round((n / maxN) * 72));
           const parts = counts
-            .map((n, i) => (n ? `<b class="${["debug", "info", "log", "warn", "err"][i]}" style="flex:${n}"></b>` : ""))
+            .map((x, i) => (x ? `<b class="${["debug", "info", "log", "warn", "err"][i]}" style="flex:${x}"></b>` : ""))
             .join("");
           return `<i style="height:${h}px">${parts}</i>`;
         })
-        .join("")}</div>`
+        .join("")}</div>
+<div class="volaxis"><span>${esc(axisClock(result.from, c))}</span><span>${endLabel}</span></div></div>`
     : "";
   const note =
     result?.note?.kind === "missing"
       ? `<p class="muted">${L("noSuchContainer", { name: result.note.name ?? "" })}</p>`
-      : result?.note?.kind === "capped"
-        ? `<p class="muted">${L("logCap", { n: result.note.n ?? 0, total: result.note.total ?? 0 })}</p>`
-        : "";
+      : "";
   const dash = "—";
   const table = result
-    ? `<p class="muted">${L("eventsLoaded", { n: rows.length, ms: result.ms })}</p>
+    ? `<div class="loaded"><b>${L("eventsLoaded", { n: rows.length })}</b><span class="muted">${L("loadedIn", { ms: result.ms })}</span></div>
        ${rows.length ? "" : `<p class="muted">${L("noLogMatch")}</p>`}
-       <table class="logtbl"><tr><th>${L("when")}</th><th>${L("container")}</th><th>${L("level")}</th><th>${L("method")}</th><th>${L("message")}</th><th>${L("status")}</th><th>${L("duration")}</th></tr>${rows
+       <table class="logtbl"><tr><th></th><th>${L("when")}</th><th>${L("container")}</th><th>${L("level")}</th><th>${L("method")}</th><th>${L("message")}</th><th>${L("status")}</th><th>${L("duration")}</th></tr>${rows
          .map((r) => {
            const acc = parseAccess(r.message);
-           const when = r.ts ? clock(r.ts, c) : dash;
-           return `<tr><td class="mono">${esc(when)}</td><td class="mono"><a class="link" href="${b}/logs?container=${encodeURIComponent(r.container)}&after=${encodeURIComponent(after)}">${esc(r.container)}</a></td><td><span class="chip ${lvClass(r.level)} lv">${esc(r.level || dash)}</span></td><td class="mono">${esc(acc.method || dash)}</td><td>${esc((acc.text || r.message).slice(0, 400))}</td><td class="mono">${esc(acc.status || dash)}</td><td class="mono">${esc(acc.duration || dash)}</td></tr>`;
+           const href = new URLSearchParams(keep);
+           href.set("container", r.container);
+           return `<tr><td class="ch">${ico("chevronRight")}</td><td class="mono">${r.ts ? esc(rowClock(r.ts, c)) : dash}</td><td class="mono"><a class="link" href="${b}/logs?${href}">${esc(r.container)}</a></td><td><span class="lvdot ${lvClass(r.level)}">${esc(r.level || "log")}</span></td><td class="mono">${esc(acc.method || dash)}</td><td>${esc((acc.text || r.message).slice(0, 400))}</td><td class="mono">${esc(acc.status || dash)}</td><td class="mono">${esc(acc.duration || dash)}</td></tr>`;
          })
-         .join("")}</table>`
+         .join("")}</table>${LOG_ZOOM}`
     : "";
   return layout(
     c,
     "/logs",
     t(c.lang, "logs"),
     `<div class="pagehead"><div><h1>${ico("terminal")} ${L("logs")}</h1><p class="muted">${L("logsIntro")}</p></div>
-<form method="get" action="${b}/logs" class="logtools">
+<form method="get" action="${b}/logs" class="logtools">${ico("boxes")}
 <select name="container" onchange="this.form.submit()"><option value="">${L("allContainers")}</option>${names.map((n) => `<option value="${esc(n.name)}" ${n.name === selected ? "selected" : ""}>${esc(n.name)}</option>`).join("")}</select>
-<input type="hidden" name="q" value="${esc(qVal)}">
-<input type="hidden" name="after" value="${esc(after)}">
-${live ? `<input type="hidden" name="live" value="1">` : ""}
-<a class="pill ${live ? "on" : ""}" href="${b}/logs?${new URLSearchParams({ ...(qVal ? { q: qVal } : {}), ...(selected ? { container: selected } : {}), after, ...(live ? {} : { live: "1" }) })}">${L("live")}</a>
+${hidden}
+<a class="pill ${live ? "on" : ""}" href="${b}/logs?${liveHref}">${ico("play")}${L("live")}</a>
 </form></div>
-<form class="logbar" method="get" action="${b}/logs">${ico("search")}
+<form class="logbar" method="get" action="${b}/logs">${ico("search")}<span class="logsql">${L("logsql")}</span>
 <input type="hidden" name="container" value="${esc(selected)}">
+${fromQ ? `<input type="hidden" name="from" value="${esc(fromQ)}">` : ""}
+${toQ ? `<input type="hidden" name="to" value="${esc(toQ)}">` : ""}
 ${live ? `<input type="hidden" name="live" value="1">` : ""}
-<input name="q" placeholder="level:error AND container_name:nginx" value="${esc(qVal)}" style="flex:1">
-<select name="after" onchange="this.form.submit()">${LOG_AFTER.map((w) => `<option value="${w}" ${after === w ? "selected" : ""}>${w}</option>`).join("")}</select>
-<button>${L("search")}</button></form>
-${
-  result
-    ? `<div class="volhead"><span>${L("volume")} · ${rows.length}</span><span class="legend"><span><b class="debug" style="background:#94a3b8"></b>debug</span><span><b style="background:#16a34a"></b>info</span><span><b style="background:#86efac"></b>log</span><span><b style="background:#d97706"></b>warn</span><span><b style="background:#dc2626"></b>error</span></span></div>
-<div class="muted">${esc(clock(result.from, c))} → ${esc(clock(result.to, c))}</div>
-${hist}`
-    : ""
-}
+<input name="q" placeholder="level:error AND container_name:nginx" value="${esc(qVal)}"></form>
+${hist}
 ${note}
 ${table}
-<p class="muted">${L("logHint")}</p>`,
+${total === 0 ? `<p class="muted">${L("logHint")}</p>` : ""}`,
   );
 }
 

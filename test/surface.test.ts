@@ -93,11 +93,26 @@ describe("logs, findings, alerts", () => {
       to: now,
     });
     expect(html).toContain('class="vol"');
-    expect(html).toContain("1 events loaded in 12 ms");
+    expect(html).toContain("1 events loaded");
+    expect(html).toContain("in 12ms");
+    expect(html).toContain("drag to zoom");
+    expect(html).toContain("15:59:00.000");
+    expect(html).toContain(">now<");
     expect(html).toContain("authentik-server");
     expect(html).toContain(">GET<");
     expect(html).toContain(">302<");
     expect(html).toContain("<td>/</td>");
+    const indexed = logsPage(c, {
+      rows: [{ ts: now - 60_000, level: "info", container: "tailscale-dns", message: "[INFO] A IN www.google.com" }],
+      ms: 9,
+      from: now - 12 * 86_400_000,
+      to: now,
+      total: 2_090_370,
+    });
+    expect(indexed).toContain("2,090,370");
+    expect(indexed).toContain("1 events loaded");
+    expect(indexed).toContain("tailscale-dns");
+    expect(indexed).not.toContain("does not keep an index");
     expect(parseAccess('127.0.0.1 - - "GET / HTTP/1.1" 302').status).toBe("302");
     expect(parseLogsql("LogsQL level:error AND container_name:nginx")).toEqual({ query: undefined, container: "nginx", levels: ["error"] });
   });

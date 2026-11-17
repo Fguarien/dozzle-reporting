@@ -15,6 +15,8 @@ import { pickLang } from "./web/i18n.ts";
 import { configFromEnv, OidcGate } from "./auth/oidc-gate.ts";
 import { reviewLogs, summarizeAlert, askAbout } from "./llm/review.ts";
 import { fetchLogs } from "./web/logfetch.ts";
+import { queryLogs } from "./store/logindex.ts";
+import { startLogIngest } from "./logs/ingest.ts";
 import { createToken, findToken, listTokens, recordCall, revokeToken, toolOf } from "./mcp/tokens.ts";
 import { clearMute, isMuted, muteDeadline, muteUntil, setMuteUntil } from "./notify/mute.ts";
 import { digestText } from "./notify/digest.ts";
@@ -160,6 +162,7 @@ async function main(): Promise<void> {
 
   const collectors = [...clients.values()].map((c) => new Collector(db, c, { bucketSeconds: cfg.bucketSeconds, log }));
   for (const c of collectors) void c.run();
+  const stopIngest = startLogIngest(db, clients, log, cfg.retentionDays);
   setInterval(() => prune(db, cfg.retentionDays), 3_600_000).unref();
 
   const gate = (() => {
@@ -431,16 +434,18 @@ async function main(): Promise<void> {
           const q = url.searchParams;
           const parsed = ui.parseLogsql(q.get("q") ?? "");
           const container = q.get("container") || parsed.container;
-          if (q.get("live") === "1") pc.refreshSec = 12;
+          const fromN = Number(q.get("from"));
+          const toN = Number(q.get("to"));
+          if (q.get("live") === "1") pc.refreshSec = 5;
           const t0 = Date.now();
-          const after = q.get("after") || "15m";
-          const fetched = await fetchLogs(db, ctx.clients, {
-            query: parsed.query,
+          const fetched = queryLogs(db, {
             container,
             levels: parsed.levels,
-            after,
-            limit: 200,
+            text: parsed.query,
+            from: Number.isFinite(fromN) && fromN > 0 ? fromN : undefined,
+            to: Number.isFinite(toN) && toN > 0 ? toN : undefined,
             now: Date.now(),
+            limit: 200,
           });
           html = ui.logsPage(pc, { ...fetched, ms: Date.now() - t0 });
         } else if (sub === "/instances") {
@@ -470,6 +475,7 @@ async function main(): Promise<void> {
   http.listen(cfg.port, () => log(`dozzle-reporting ${VERSION} listening on :${cfg.port} (${clients.size} instance(s))`));
 
   const stop = () => {
+    stopIngest();
     for (const c of collectors) c.stop();
     http.close();
     setTimeout(() => process.exit(0), 2000).unref();
