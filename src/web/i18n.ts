@@ -34,7 +34,8 @@ export const DICT = {
     hideNoise: "Lifecycle noise hidden (start/destroy). ", showRaw: "Show raw events", hideRaw: "Hide start/destroy",
     instancesConnected: "Connected Dozzle instances sending events to this account. {n} instance connected.",
     batchHourly: "Updates batch hourly", primary: "PRIMARY",
-    avg: "avg",
+    avg: "avg", backToAlerts: "Back to alerts", openEvent: "Open event", viewMetrics: "View metrics",
+    muteThese: "Mute these", markFixed: "Mark as fixed",
   },
   fr: {
     overview: "Vue d'ensemble", findings: "Constats", updates: "Mises à jour", alerts: "Alertes", logs: "Logs", metrics: "Métriques",
@@ -70,7 +71,8 @@ export const DICT = {
     hideNoise: "Bruit de cycle de vie masqué (start/destroy). ", showRaw: "Voir les événements bruts", hideRaw: "Masquer start/destroy",
     instancesConnected: "Instances Dozzle qui envoient des événements. {n} instance connectée.",
     batchHourly: "Envoi groupé à l'heure", primary: "PRIMARY",
-    avg: "moy",
+    avg: "moy", backToAlerts: "Retour aux alertes", openEvent: "Ouvrir l'événement", viewMetrics: "Voir les métriques",
+    muteThese: "Mettre en sourdine", markFixed: "Marquer comme corrigé",
   },
 } as const;
 

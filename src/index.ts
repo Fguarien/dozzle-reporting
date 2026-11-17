@@ -241,6 +241,7 @@ async function main(): Promise<void> {
         else if (sub === "/alerts") html = ui.alertsPage(pc, "alerts");
         else if (sub === "/alerts/events") html = ui.alertsPage(pc, "events");
         else if (sub === "/alerts/muted") html = ui.alertsPage(pc, "muted");
+        else if (/^\/alerts\/\d+$/.test(sub)) html = ui.alertDetail(pc, Number(sub.slice("/alerts/".length)));
         else if (sub === "/metrics") html = ui.metricsPage(pc);
         else if (m) html = ui.metricDetail(pc, decodeURIComponent(m[1]!), decodeURIComponent(m[2]!), decodeURIComponent(m[3]!));
         else if (sub === "/logs") {
