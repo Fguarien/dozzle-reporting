@@ -267,11 +267,59 @@ export class DozzleClient {
   }
 
   /**
+   * Newest `limit` lines of one container.
+   * `min` sizes Dozzle's ring and walks the window backward until that many
+   * lines exist, so the answer is the tail. `maxStart` stops at the first
+   * lines and is not sent. Dozzle rejects `min` above {@link LOG_PAGE}.
+   * A longer body, if one ever comes back, is cut from the end.
+   */
+  async logsNewest(host: string, id: string, limit: number, opts?: { levels?: string[]; from?: Date; to?: Date; filter?: string }): Promise<LogLine[]> {
+    const n = Math.min(Math.max(1, limit), LOG_PAGE);
+    const to = opts?.to ?? new Date();
+    const from = opts?.from ?? new Date(to.getTime() - 5 * 60_000);
+    const form = new URLSearchParams();
+    form.set("container", `${host}/${id}`);
+    form.set("stdout", "1");
+    form.set("stderr", "1");
+    form.set("format", "jsonl");
+    form.set("from", from.toISOString());
+    form.set("to", to.toISOString());
+    form.set("min", String(n));
+    if (opts?.filter) form.set("filter", opts.filter);
+    for (const l of opts?.levels?.length ? opts.levels : LOG_LEVELS) form.append("levels", l);
+    const r = await this.request("/api/containers/logs", {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(20_000),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept-Encoding": "identity",
+      },
+    });
+    if (!r.ok) throw new DozzleError(r.status, `logs newest → ${r.status} ${(await r.text()).slice(0, 200)}`);
+    const out: LogLine[] = [];
+    for (const line of (await r.text()).split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const j = JSON.parse(line) as { m?: unknown; ts?: number; l?: string };
+        const message = eventMessage(j.m).slice(0, 500);
+        const ts = Number(j.ts);
+        if (!message || !Number.isFinite(ts) || ts <= 0) continue;
+        out.push({ ts, level: j.l || "unknown", message });
+      } catch {
+        /* skip a non-event line */
+      }
+    }
+    return out.length > n ? out.slice(out.length - n) : out;
+  }
+
+  /**
    * Oldest page of one container (Dozzle v11.4 `POST /api/containers/logs`).
    * `format=jsonl` with a paging field keeps plain-text lines; without one,
    * Dozzle sends JSON object messages only. `maxStart` stops at the first
    * events, so a wide window does not come back as its newest 500 and skip
    * the rest. Dozzle rejects `maxStart` above {@link LOG_PAGE}.
+   * The logs table must not call this: it is the backfill only.
    */
   async logsBetween(host: string, id: string, from: Date, to: Date, max = LOG_PAGE): Promise<{ ts: number; level: string; message: string }[]> {
     const page = Math.min(Math.max(1, max), LOG_PAGE);

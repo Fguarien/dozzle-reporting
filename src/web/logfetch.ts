@@ -38,11 +38,12 @@ type StoredTail = {
 };
 
 /**
- * Newest lines of one container, the page Cloud calls Tailing.
- * No time window: Dozzle's log tool then reads the last minutes and keeps the
- * newest `limit`. A quiet container (nothing in that window) is read once more
- * over the last day. The index backfill is still on the oldest page, so the
- * table must not read it for this.
+ * The last `limit` lines of one container, newest first.
+ * Dozzle `min` is a ring of that size: it keeps the newest lines and walks
+ * backward until it has them. `maxStart` is the first lines and is not used.
+ * The index is filled from the oldest page, so this table does not read it.
+ * A text search stays on the MCP tool, which also keeps the newest matches,
+ * and is read once more over a day only when that short read is empty.
  */
 export async function tailContainer(
   db: Db,
@@ -75,11 +76,10 @@ export async function tailContainer(
     const shown = packed.slice(0, o.limit);
     return { rows: shown.map((p) => p.row), store: shown.map((p) => p.store) };
   };
+  if (!o.query) return pack(await cl.logsNewest(target.host, target.id, o.limit, { levels: o.levels }));
   const base = { host: target.host, id: target.id, query: o.query, levels: o.levels, limit: o.limit };
   let got = pack(await cl.containerLines(base));
-  if (!got.rows.length && !o.query) {
-    got = pack(await cl.containerLines({ ...base, from: new Date(Date.now() - 86_400_000) }));
-  }
+  if (!got.rows.length) got = pack(await cl.containerLines({ ...base, from: new Date(Date.now() - 86_400_000) }));
   return got;
 }
 

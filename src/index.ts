@@ -442,10 +442,13 @@ async function main(): Promise<void> {
           const t0 = Date.now();
           let tailRows: { ts: number; level: string; container: string; message: string }[] | undefined;
           if (container && !zoomed) {
+            // Empty stays empty. The index's newest rows are the first page of
+            // the backfill, and that page must not fill this table.
+            tailRows = [];
             try {
               const tail = await tailContainer(db, clients, { container, query: parsed.query, levels: parsed.levels, limit: 200 });
               if (tail.store.length) insertLines(db, tail.store);
-              if (tail.rows.length) tailRows = tail.rows;
+              tailRows = tail.rows;
             } catch (e) {
               log(`tail ${container}: ${(e as Error).message}`);
             }
